@@ -1,7 +1,7 @@
 schema_version: 1
 current_phase: RG-R00
 builder_status: IMPLEMENTED
-automated_status: AUTOMATED_PASS
+automated_status: NOT_RUN
 owner_ui_status: PENDING
 owner_acceptance: PENDING
 ci_status: NOT_CONFIGURED

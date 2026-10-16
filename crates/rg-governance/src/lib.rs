@@ -412,7 +412,11 @@ mod tests {
 
     #[test]
     fn implementation_deliverables_must_match_phase_manifest() {
-        let changed = IMPLEMENTATION_SOURCE.replace("  desktop_shell: IMPLEMENTED\n", "");
+        let changed = IMPLEMENTATION_SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("desktop_shell:"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &changed).is_err());
     }
 
