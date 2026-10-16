@@ -1,0 +1,3 @@
+[build]
+# Keep all Rust outputs under the authoritative D: project root.
+target-dir = "target"

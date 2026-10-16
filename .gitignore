@@ -1,0 +1,11 @@
+/.tools/
+/target/
+/node_modules/
+/dist/
+/src-tauri/target/
+/src-tauri/gen/
+/artifacts/acceptance/
+/work/
+*.log
+.DS_Store
+Thumbs.db

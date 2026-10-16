@@ -1,0 +1,40 @@
+schema_version: 1
+project: MAX Research Ground
+current_phase: RG-R00
+phases:
+  - id: RG-R00
+    name: Rust foundation, Tauri shell, governance, CI
+    objective: Create the modular Rust research core foundation and a truthful desktop shell.
+    lifecycle: ACTIVE
+  - id: RG-R01
+    name: Data Ground
+    objective: Add historical ingestion, dataset integrity, lineage, and data quality audit.
+    lifecycle: PLANNED
+  - id: RG-R02
+    name: Feature Studio
+    objective: Add a versioned indicator registry and anti-lookahead feature engine.
+    lifecycle: PLANNED
+  - id: RG-R03
+    name: Deterministic Strategy Engine
+    objective: Add deterministic native Rust strategies and isolated strategy contracts.
+    lifecycle: PLANNED
+  - id: RG-R04
+    name: Ollama and ONNX Model Registry
+    objective: Add model discovery, immutable identity, runtime adapters, and model comparison.
+    lifecycle: PLANNED
+  - id: RG-R05
+    name: Policy DSL and Extensibility
+    objective: Add a typed policy DSL, visual policy builder, and isolated extensibility.
+    lifecycle: PLANNED
+  - id: RG-R06
+    name: Experiment Orchestration
+    objective: Add experiment matrices, queueing, resume, checkpoint, and resource control.
+    lifecycle: PLANNED
+  - id: RG-R07
+    name: Replay and Evaluation
+    objective: Add replay, metrics, walk-forward, CPCV, Monte Carlo, and untouched OOS.
+    lifecycle: PLANNED
+  - id: RG-R08
+    name: Integrated Desktop UI and Owner Acceptance
+    objective: Integrate implemented modules and complete Owner acceptance.
+    lifecycle: PLANNED

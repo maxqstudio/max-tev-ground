@@ -1,0 +1,29 @@
+schema_version: 1
+phase: RG-R00
+lifecycle: ACTIVE
+deliverables:
+  - foundation
+  - research_contracts
+  - desktop_shell
+  - persistence
+  - governance
+  - acceptance_evidence
+acceptance_gates:
+  - id: rust_workspace
+    requirement: Rust workspace builds and its tests pass on the exact candidate.
+  - id: frontend
+    requirement: Frontend lint, typecheck, tests, and production build pass.
+  - id: tauri_build
+    requirement: Tauri desktop binary builds, or records an evidenced environment block.
+  - id: persistence
+    requirement: SQLite schema versioning, migrations, rollback, and failure handling pass.
+  - id: contracts
+    requirement: Versioned research contracts and serialization validation pass.
+  - id: roadmap_governance
+    requirement: Roadmap, phase manifest, implementation state, and generated documentation agree.
+  - id: baseline_read_only
+    requirement: The prior MAX_JEV_BENCHMARK research baseline remains read-only and untouched.
+  - id: exact_source_evidence
+    requirement: Acceptance evidence names the exact clean source commit and tree.
+  - id: owner_ui_acceptance
+    requirement: Owner reviews the desktop UI; automated tests do not substitute for this gate.

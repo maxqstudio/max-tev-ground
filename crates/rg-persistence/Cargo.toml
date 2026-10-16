@@ -1,0 +1,15 @@
+[package]
+name = "rg-persistence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rg-contracts = { path = "../rg-contracts" }
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
