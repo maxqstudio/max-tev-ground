@@ -14,7 +14,9 @@ import {
 } from "lucide-react";
 import type {
   DatasetCatalogEntry,
+  DatasetCatalogProgress,
   DatasetStatus,
+  ActiveImportState,
   FieldMapping,
   ImportAttempt,
   ImportCommitResult,
@@ -219,29 +221,45 @@ export default function DataGround() {
   const [busy, setBusy] = useState<"loading" | "selecting" | "inspecting" | "previewing" | "confirming" | "cancelling" | null>("loading");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [previewPending, setPreviewPending] = useState(false);
+  const [catalogProgress, setCatalogProgress] = useState<DatasetCatalogProgress | null>(null);
+  const [catalogCancelling, setCatalogCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const refreshRegistry = useCallback(async () => {
-    const [nextDatasets, nextAttempts] = await Promise.all([
-      invoke<DatasetCatalogEntry[]>("list_datasets"),
+    const [progress, nextAttempts] = await Promise.all([
+      invoke<DatasetCatalogProgress>("start_dataset_catalog_verification"),
       invoke<ImportAttempt[]>("list_import_attempts"),
     ]);
-    setDatasets(nextDatasets);
+    setCatalogProgress(progress);
+    setDatasets(progress.datasets);
     setAttempts(nextAttempts);
-    return nextDatasets;
+    return progress.datasets;
   }, []);
 
   useEffect(() => {
     let current = true;
     Promise.all([
-      invoke<DatasetCatalogEntry[]>("list_datasets"),
+      invoke<DatasetCatalogProgress>("start_dataset_catalog_verification"),
       invoke<ImportAttempt[]>("list_import_attempts"),
-    ]).then(([nextDatasets, nextAttempts]) => {
+      invoke<ActiveImportState | null>("get_active_data_import"),
+    ]).then(([nextCatalog, nextAttempts, activeImport]) => {
       if (!current) return;
-      setDatasets(nextDatasets);
+      setCatalogProgress(nextCatalog);
+      setDatasets(nextCatalog.datasets);
       setAttempts(nextAttempts);
-      setBusy(null);
+      if (activeImport?.state === "PREPARED") {
+        setPreview(activeImport.session);
+        setActiveJobId(activeImport.session.jobId);
+        setNotice("The validated import preview was restored. Confirm or cancel it before starting another import.");
+        setBusy(null);
+      } else if (activeImport?.state === "RUNNING") {
+        setActiveJobId(activeImport.jobId);
+        setPreviewPending(true);
+        setBusy("previewing");
+      } else {
+        setBusy(null);
+      }
     }).catch((reason: unknown) => {
       if (!current) return;
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -249,6 +267,78 @@ export default function DataGround() {
     });
     return () => { current = false; };
   }, []);
+
+  useEffect(() => {
+    let current = true;
+    let timer: number | undefined;
+    async function pollActiveImport() {
+      try {
+        const active = await invoke<ActiveImportState | null>("get_active_data_import");
+        if (!current) return;
+        if (active?.state === "PREPARED") {
+          setPreview(active.session);
+          setActiveJobId(active.session.jobId);
+          setPreviewPending(false);
+          setBusy(null);
+          setNotice("The validated import preview was restored. Confirm or cancel it before starting another import.");
+          return;
+        }
+        if (active?.state === "RUNNING") {
+          setActiveJobId(active.jobId);
+          setPreviewPending(true);
+          setBusy((value) => value === "cancelling" ? value : "previewing");
+          timer = window.setTimeout(pollActiveImport, 300);
+          return;
+        }
+        setActiveJobId(null);
+        setPreviewPending(false);
+        setBusy(null);
+        setNotice("The import ended before a validated preview was prepared. Select the source again to retry.");
+      } catch (reason) {
+        if (!current) return;
+        setBusy(null);
+        setError(reason instanceof Error ? reason.message : String(reason));
+        timer = window.setTimeout(pollActiveImport, 1_000);
+      }
+    }
+    if (previewPending && activeJobId) timer = window.setTimeout(pollActiveImport, 300);
+    return () => {
+      current = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [activeJobId, previewPending]);
+
+  useEffect(() => {
+    if (!catalogProgress || catalogProgress.status !== "RUNNING") return;
+    let current = true;
+    let timer: number | undefined;
+    async function pollCatalog() {
+      try {
+        const progress = await invoke<DatasetCatalogProgress | null>("get_dataset_catalog_progress");
+        if (!current) return;
+        if (!progress) {
+          setCatalogProgress(null);
+          setDatasets([]);
+          setError("Dataset verification job is no longer available. Refresh the registry to verify it again.");
+          return;
+        }
+        setCatalogProgress(progress);
+        setDatasets(progress.datasets);
+        if (progress.status === "RUNNING") timer = window.setTimeout(pollCatalog, 250);
+        if (progress.status === "FAILED") setError(progress.error ?? "Dataset verification failed.");
+        if (progress.status !== "RUNNING") setCatalogCancelling(false);
+      } catch (reason) {
+        if (!current) return;
+        setError(reason instanceof Error ? reason.message : String(reason));
+        timer = window.setTimeout(pollCatalog, 1_000);
+      }
+    }
+    timer = window.setTimeout(pollCatalog, 250);
+    return () => {
+      current = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [catalogProgress?.jobId, catalogProgress?.status]);
 
   function updateForm<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -357,9 +447,12 @@ export default function DataGround() {
     if (!activeJobId) return;
     setError(null);
     setBusy("cancelling");
+    let waitingForWorker = false;
     try {
       const result = await invoke<string>("cancel_data_import", { jobId: activeJobId });
       if (result === "CANCELLATION_REQUESTED") {
+        waitingForWorker = true;
+        setBusy("cancelling");
         setNotice("Cancellation requested. The importer will stop at its next safe checkpoint.");
       } else {
         setPreview(null);
@@ -370,7 +463,18 @@ export default function DataGround() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
-      setBusy(null);
+      if (!waitingForWorker) setBusy(null);
+    }
+  }
+
+  async function cancelCatalogVerification() {
+    setCatalogCancelling(true);
+    try {
+      const result = await invoke<string>("cancel_dataset_catalog_verification");
+      if (result !== "CANCELLATION_REQUESTED") setCatalogCancelling(false);
+    } catch (reason) {
+      setCatalogCancelling(false);
+      setError(reason instanceof Error ? reason.message : String(reason));
     }
   }
 
@@ -492,11 +596,19 @@ export default function DataGround() {
             </form>
           </>
         ) : (
-          <div className="empty-source">
-            <div className="empty-source-icon"><FileUp size={20} /></div>
-            <div><strong>{busy === "loading" ? "Loading dataset registry…" : "No source selected"}</strong><p>Choose a local CSV or Parquet file to inspect its columns and configure the import contract.</p></div>
-            <button className="button button-secondary" type="button" onClick={chooseSource} disabled={busy !== null}><FileUp size={15} />Choose file</button>
-          </div>
+          previewPending && activeJobId ? (
+            <div className="empty-source" role="status">
+              <div className="empty-source-icon"><span className="loading-indicator" /></div>
+              <div><strong>Import validation is still running</strong><p>The active import was restored after navigation. You can wait or cancel it here.</p></div>
+              <button className="button button-secondary" type="button" onClick={cancelPreview} disabled={busy === "cancelling"}><X size={15} />{busy === "cancelling" ? "Cancelling…" : "Cancel import"}</button>
+            </div>
+          ) : (
+            <div className="empty-source">
+              <div className="empty-source-icon"><FileUp size={20} /></div>
+              <div><strong>{busy === "loading" ? "Loading dataset registry…" : preview ? "Import preview restored" : "No source selected"}</strong><p>{preview ? "Confirm or cancel the restored preview before selecting another source." : "Choose a local CSV or Parquet file to inspect its columns and configure the import contract."}</p></div>
+              <button className="button button-secondary" type="button" onClick={chooseSource} disabled={busy !== null || Boolean(preview)}><FileUp size={15} />Choose file</button>
+            </div>
+          )
         )}
       </section>
 
@@ -508,8 +620,10 @@ export default function DataGround() {
           <div><h2 id="registry-title">Dataset registry</h2><p>Registered snapshots are immutable; every read rechecks manifest and file hashes.</p></div>
           <button className="icon-button" type="button" aria-label="Refresh dataset registry" onClick={() => { setBusy("loading"); refreshRegistry().catch((reason: unknown) => setError(String(reason))).finally(() => setBusy(null)); }} disabled={busy !== null}><RefreshCw size={15} /></button>
         </div>
+        {catalogProgress?.status === "RUNNING" && <div className="catalog-progress" role="status"><span className="loading-indicator" /> Verifying snapshot integrity · {catalogProgress.completed} / {catalogProgress.total}<button type="button" className="button button-quiet" onClick={cancelCatalogVerification} disabled={catalogCancelling}>{catalogCancelling ? "Cancelling…" : "Cancel verification"}</button></div>}
+        {catalogProgress?.status === "CANCELLED" && <div className="catalog-progress" role="status">Verification cancelled · {catalogProgress.completed} / {catalogProgress.total} snapshots checked.</div>}
         {datasets.length === 0 ? (
-          <div className="empty-registry"><Database size={19} /><span>{busy === "loading" ? "Reading local registry…" : "No datasets registered yet."}</span></div>
+          <div className="empty-registry"><Database size={19} /><span>{catalogProgress?.status === "RUNNING" ? "Verifying registered snapshots…" : catalogProgress?.status === "CANCELLED" ? "Verification cancelled. Unchecked snapshots are hidden." : catalogProgress?.status === "FAILED" ? "Verification failed. Unchecked snapshots are hidden." : busy === "loading" ? "Reading local registry…" : "No datasets registered yet."}</span></div>
         ) : (
           <div className="dataset-table-wrap">
             <table className="dataset-table">

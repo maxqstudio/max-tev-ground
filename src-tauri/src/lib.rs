@@ -17,8 +17,12 @@ fn register_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Bu
         data_ground_commands::select_data_source,
         data_ground_commands::inspect_selected_source,
         data_ground_commands::preview_data_import,
+        data_ground_commands::get_active_data_import,
         data_ground_commands::confirm_data_import,
         data_ground_commands::cancel_data_import,
+        data_ground_commands::start_dataset_catalog_verification,
+        data_ground_commands::get_dataset_catalog_progress,
+        data_ground_commands::cancel_dataset_catalog_verification,
         data_ground_commands::list_datasets,
         data_ground_commands::inspect_dataset,
         data_ground_commands::list_import_attempts

@@ -25,6 +25,9 @@ pub struct DataGroundState {
     start_lock: Mutex<()>,
     running_imports: Mutex<HashMap<String, RunningImport>>,
     prepared_imports: Mutex<HashMap<String, PreparedImport>>,
+    catalog_job: Mutex<Option<CatalogVerificationJob>>,
+    #[cfg(test)]
+    catalog_worker_gate: Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
 struct RunningImport {
@@ -35,6 +38,31 @@ struct PreparedImport {
     prepared: PreparedDataset,
 }
 
+struct CatalogVerificationJob {
+    cancel: Arc<AtomicBool>,
+    progress: Arc<Mutex<DatasetCatalogProgress>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetCatalogProgress {
+    pub job_id: String,
+    pub status: CatalogVerificationStatus,
+    pub completed: usize,
+    pub total: usize,
+    pub datasets: Vec<DatasetCatalogEntry>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CatalogVerificationStatus {
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
 impl DataGroundState {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, DatasetStoreError> {
         Ok(Self {
@@ -43,6 +71,9 @@ impl DataGroundState {
             start_lock: Mutex::new(()),
             running_imports: Mutex::new(HashMap::new()),
             prepared_imports: Mutex::new(HashMap::new()),
+            catalog_job: Mutex::new(None),
+            #[cfg(test)]
+            catalog_worker_gate: Mutex::new(None),
         })
     }
 
@@ -99,6 +130,187 @@ pub struct SelectedSourceInspection {
 pub struct ImportPreviewSession {
     pub job_id: String,
     pub preview: ImportPreview,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "state", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ActiveImportState {
+    Running {
+        #[serde(rename = "jobId")]
+        job_id: String,
+    },
+    Prepared {
+        session: ImportPreviewSession,
+    },
+}
+
+impl DataGroundState {
+    fn active_import(&self) -> Result<Option<ActiveImportState>, String> {
+        let _start = self
+            .start_lock
+            .lock()
+            .map_err(|_| "import state is unavailable".to_owned())?;
+        if let Some((job_id, prepared)) = self
+            .prepared_imports
+            .lock()
+            .map_err(|_| "import state is unavailable".to_owned())?
+            .iter()
+            .next()
+        {
+            return Ok(Some(ActiveImportState::Prepared {
+                session: ImportPreviewSession {
+                    job_id: job_id.clone(),
+                    preview: prepared.prepared.preview.clone(),
+                },
+            }));
+        }
+        let running = self
+            .running_imports
+            .lock()
+            .map_err(|_| "import state is unavailable".to_owned())?
+            .keys()
+            .next()
+            .cloned();
+        Ok(running.map(|job_id| ActiveImportState::Running { job_id }))
+    }
+
+    fn start_catalog_verification(&self) -> Result<DatasetCatalogProgress, String> {
+        let mut current = self
+            .catalog_job
+            .lock()
+            .map_err(|_| "catalog verification state is unavailable".to_owned())?;
+        if let Some(job) = current.as_ref() {
+            let progress = job
+                .progress
+                .lock()
+                .map_err(|_| "catalog verification progress is unavailable".to_owned())?
+                .clone();
+            if progress.status == CatalogVerificationStatus::Running {
+                return Ok(progress);
+            }
+        }
+
+        let total = self
+            .store
+            .dataset_count()
+            .map_err(|error| error.to_string())?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(Mutex::new(DatasetCatalogProgress {
+            job_id: Uuid::now_v7().to_string(),
+            status: if total == 0 {
+                CatalogVerificationStatus::Completed
+            } else {
+                CatalogVerificationStatus::Running
+            },
+            completed: 0,
+            total,
+            datasets: Vec::new(),
+            error: None,
+        }));
+        *current = Some(CatalogVerificationJob {
+            cancel: Arc::clone(&cancel),
+            progress: Arc::clone(&progress),
+        });
+        if total == 0 {
+            return Ok(progress
+                .lock()
+                .map_err(|_| "catalog verification progress is unavailable".to_owned())?
+                .clone());
+        }
+
+        let store = Arc::clone(&self.store);
+        #[cfg(test)]
+        let test_gate = self
+            .catalog_worker_gate
+            .lock()
+            .map_err(|_| "catalog test gate is unavailable".to_owned())?
+            .clone();
+        let worker_cancel = Arc::clone(&cancel);
+        let worker_progress = Arc::clone(&progress);
+        let spawn_result = std::thread::Builder::new()
+            .name("rg-dataset-catalog-verifier".into())
+            .spawn(move || {
+                #[cfg(test)]
+                if let Some(gate) = test_gate {
+                    gate.wait();
+                }
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    store.list_datasets_with_progress(&worker_cancel, |completed, total, entry| {
+                        if let Ok(mut progress) = worker_progress.lock() {
+                            progress.completed = completed;
+                            progress.total = total;
+                            progress.datasets.push(entry.clone());
+                        }
+                    })
+                }));
+                if let Ok(mut progress) = worker_progress.lock() {
+                    match result {
+                        Ok(Ok(entries)) => {
+                            progress.completed = entries.len();
+                            progress.total = entries.len();
+                            progress.datasets = entries;
+                            progress.status = CatalogVerificationStatus::Completed;
+                        }
+                        Ok(Err(rg_data_ground::store::DatasetStoreError::Data(
+                            rg_data_ground::DataGroundError::Cancelled,
+                        ))) => progress.status = CatalogVerificationStatus::Cancelled,
+                        Ok(Err(error)) => {
+                            progress.status = CatalogVerificationStatus::Failed;
+                            progress.error = Some(error.to_string());
+                        }
+                        Err(_) => {
+                            progress.status = CatalogVerificationStatus::Failed;
+                            progress.error =
+                                Some("catalog verifier terminated unexpectedly".into());
+                        }
+                    }
+                }
+            });
+        if let Err(error) = spawn_result {
+            if let Ok(mut progress) = progress.lock() {
+                progress.status = CatalogVerificationStatus::Failed;
+                progress.error = Some(format!("catalog verifier could not start: {error}"));
+            }
+        }
+        let snapshot = progress
+            .lock()
+            .map_err(|_| "catalog verification progress is unavailable".to_owned())?
+            .clone();
+        Ok(snapshot)
+    }
+
+    fn catalog_progress(&self) -> Result<Option<DatasetCatalogProgress>, String> {
+        self.catalog_job
+            .lock()
+            .map_err(|_| "catalog verification state is unavailable".to_owned())?
+            .as_ref()
+            .map(|job| {
+                job.progress
+                    .lock()
+                    .map(|progress| progress.clone())
+                    .map_err(|_| "catalog verification progress is unavailable".to_owned())
+            })
+            .transpose()
+    }
+
+    fn cancel_catalog_verification(&self) -> Result<String, String> {
+        let job = self
+            .catalog_job
+            .lock()
+            .map_err(|_| "catalog verification state is unavailable".to_owned())?;
+        let Some(job) = job.as_ref() else {
+            return Ok("NO_ACTIVE_VERIFICATION".into());
+        };
+        let progress = job
+            .progress
+            .lock()
+            .map_err(|_| "catalog verification progress is unavailable".to_owned())?;
+        if progress.status != CatalogVerificationStatus::Running {
+            return Ok("NO_ACTIVE_VERIFICATION".into());
+        }
+        job.cancel.store(true, Ordering::Relaxed);
+        Ok("CANCELLATION_REQUESTED".into())
+    }
 }
 
 #[tauri::command]
@@ -302,6 +514,13 @@ pub async fn confirm_data_import(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub fn get_active_data_import(
+    state: State<'_, DataGroundState>,
+) -> Result<Option<ActiveImportState>, String> {
+    state.active_import()
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn cancel_data_import(
     state: State<'_, DataGroundState>,
@@ -350,23 +569,46 @@ pub fn cancel_data_import(
 }
 
 #[tauri::command]
-pub fn list_datasets(
+pub fn start_dataset_catalog_verification(
+    state: State<'_, DataGroundState>,
+) -> Result<DatasetCatalogProgress, String> {
+    state.start_catalog_verification()
+}
+
+#[tauri::command]
+pub fn get_dataset_catalog_progress(
+    state: State<'_, DataGroundState>,
+) -> Result<Option<DatasetCatalogProgress>, String> {
+    state.catalog_progress()
+}
+
+#[tauri::command]
+pub fn cancel_dataset_catalog_verification(
+    state: State<'_, DataGroundState>,
+) -> Result<String, String> {
+    state.cancel_catalog_verification()
+}
+
+#[tauri::command]
+pub async fn list_datasets(
     state: State<'_, DataGroundState>,
 ) -> Result<Vec<DatasetCatalogEntry>, String> {
-    state
-        .store
-        .list_datasets()
+    let store = Arc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || store.list_datasets())
+        .await
+        .map_err(|error| format!("dataset catalogue worker failed: {error}"))?
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn inspect_dataset(
+pub async fn inspect_dataset(
     state: State<'_, DataGroundState>,
     dataset_id: String,
 ) -> Result<Option<DatasetCatalogEntry>, String> {
-    state
-        .store
-        .inspect_dataset(&dataset_id)
+    let store = Arc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || store.inspect_dataset(&dataset_id))
+        .await
+        .map_err(|error| format!("dataset inspection worker failed: {error}"))?
         .map_err(|error| error.to_string())
 }
 
@@ -401,6 +643,8 @@ fn store_error_code(error: &DatasetStoreError) -> &'static str {
         DatasetStoreError::InvalidPrepared(_) => "INVALID_PREPARED_SNAPSHOT",
         DatasetStoreError::ExistingDatasetCorrupt => "EXISTING_DATASET_CORRUPT",
         DatasetStoreError::OrphanDirectoryExists => "ORPHAN_DIRECTORY_EXISTS",
+        DatasetStoreError::RecoveryBlocked { .. } => "PROMOTION_RECOVERY_BLOCKED",
+        DatasetStoreError::VerificationBusy => "CATALOG_VERIFICATION_BUSY",
         DatasetStoreError::InvalidDatasetId => "INVALID_DATASET_ID",
         DatasetStoreError::Persistence(_) => "PERSISTENCE_FAILURE",
         DatasetStoreError::Io(_) => "FILESYSTEM_FAILURE",
@@ -676,6 +920,10 @@ mod tests {
             serde_json::json!({"jobId": JOB_ID, "selectionId": token, "request": request()}),
         )
         .unwrap();
+        let resumed = ipc(&webview, "get_active_data_import", serde_json::json!({})).unwrap();
+        assert_eq!(resumed["state"], "PREPARED");
+        assert_eq!(resumed["session"]["jobId"], JOB_ID);
+        assert_eq!(resumed["session"]["preview"]["bar_count"], 5);
         let cancelled = ipc(
             &webview,
             "cancel_data_import",
@@ -694,5 +942,62 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn catalog_start_returns_before_background_work_and_exposes_cancelable_progress() {
+        let directory = TempDir::new().unwrap();
+        let app_data = directory.path().join("app-data");
+        let source = directory.path().join("catalog-fixture.csv");
+        fs::write(&source, FIXTURE).unwrap();
+        let state = DataGroundState::open(&app_data).unwrap();
+        let prepared = state
+            .store
+            .prepare_import(&source, request(), Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        state.store.commit_prepared(prepared).unwrap();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        *state.catalog_worker_gate.lock().unwrap() = Some(Arc::clone(&gate));
+        let app = register_commands(mock_builder())
+            .manage(state)
+            .build(mock_context(noop_assets()))
+            .expect("mock Tauri runtime should build");
+        let webview = WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview should build");
+
+        let started = ipc(
+            &webview,
+            "start_dataset_catalog_verification",
+            serde_json::json!({}),
+        )
+        .expect("catalog start should return while hashing remains gated");
+        assert_eq!(started["status"], "RUNNING");
+        assert_eq!(started["total"], 1);
+        assert_eq!(started["completed"], 0);
+        let cancellation = ipc(
+            &webview,
+            "cancel_dataset_catalog_verification",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(cancellation, "CANCELLATION_REQUESTED");
+
+        gate.wait();
+        let mut final_progress = None;
+        for _ in 0..200 {
+            let value = ipc(
+                &webview,
+                "get_dataset_catalog_progress",
+                serde_json::json!({}),
+            )
+            .unwrap();
+            if value["status"] != "RUNNING" {
+                final_progress = Some(value);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(final_progress.unwrap()["status"], "CANCELLED");
     }
 }

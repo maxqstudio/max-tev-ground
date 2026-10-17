@@ -4,7 +4,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import App from "./App";
 import type { FoundationSnapshot } from "./types";
-import type { DatasetCatalogEntry, ImportPreviewSession, ImportRequest, SourceInspection } from "./data-ground-types";
+import type { ActiveImportState, DatasetCatalogEntry, DatasetCatalogProgress, ImportPreviewSession, ImportRequest, SourceInspection } from "./data-ground-types";
 
 const fixtureSnapshot: FoundationSnapshot = {
   project: "MAX Research Ground",
@@ -46,6 +46,15 @@ const fixtureSnapshot: FoundationSnapshot = {
   }],
 };
 
+const emptyCatalog: DatasetCatalogProgress = {
+  jobId: "catalog-fixture-job",
+  status: "COMPLETED",
+  completed: 0,
+  total: 0,
+  datasets: [],
+  error: null,
+};
+
 describe("desktop shell navigation", () => {
   beforeAll(() => {
     Object.defineProperty(window, "crypto", {
@@ -59,7 +68,9 @@ describe("desktop shell navigation", () => {
   beforeEach(() => {
     mockIPC((command) => {
       if (command === "get_foundation_status") return fixtureSnapshot;
-      if (command === "list_datasets" || command === "list_import_attempts") return [];
+      if (command === "start_dataset_catalog_verification") return emptyCatalog;
+      if (command === "get_dataset_catalog_progress" || command === "get_active_data_import") return null;
+      if (command === "list_import_attempts") return [];
       return undefined;
     });
   });
@@ -71,6 +82,36 @@ describe("desktop shell navigation", () => {
     expect(screen.getAllByText("LOCKED")).toHaveLength(2);
     expect(screen.getByText("Source adapters")).toBeTruthy();
     expect(screen.getByText(/waived, not tested/)).toBeTruthy();
+  });
+
+  it("shows bounded catalog verification progress and cancellation", async () => {
+    let cancelled = false;
+    const running: DatasetCatalogProgress = {
+      jobId: "catalog-large-fixture",
+      status: "RUNNING",
+      completed: 0,
+      total: 2,
+      datasets: [],
+      error: null,
+    };
+    mockIPC((command) => {
+      if (command === "get_foundation_status") return fixtureSnapshot;
+      if (command === "start_dataset_catalog_verification") return running;
+      if (command === "get_dataset_catalog_progress") return cancelled ? { ...running, status: "CANCELLED" } : running;
+      if (command === "cancel_dataset_catalog_verification") {
+        cancelled = true;
+        return "CANCELLATION_REQUESTED";
+      }
+      if (command === "get_active_data_import") return null;
+      if (command === "list_import_attempts") return [];
+      return undefined;
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Data Ground/ }));
+    expect(await screen.findByText(/Verifying snapshot integrity/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel verification" }));
+    expect(await screen.findByText(/Verification cancelled · 0 \/ 2 snapshots checked/)).toBeTruthy();
   });
 
   it("shows the authorized Data Ground import flow", async () => {
@@ -88,7 +129,9 @@ describe("desktop shell navigation", () => {
     const fileName = "synthetic-delimited.csv";
     mockIPC((command, payload) => {
       if (command === "get_foundation_status") return fixtureSnapshot;
-      if (command === "list_datasets" || command === "list_import_attempts") return [];
+      if (command === "start_dataset_catalog_verification") return emptyCatalog;
+      if (command === "get_dataset_catalog_progress" || command === "get_active_data_import") return null;
+      if (command === "list_import_attempts") return [];
       if (command === "select_data_source") return { selectionId: "delimiter-fixture-token", fileName };
       if (command === "inspect_selected_source") {
         const request = typeof payload === "object" && payload !== null && !Array.isArray(payload)
@@ -127,6 +170,7 @@ describe("desktop shell navigation", () => {
 
   it("previews a labeled fixture before registration, then freezes it after explicit confirmation", async () => {
     let imported = false;
+    let activeImport: ActiveImportState | null = null;
     const previewRequests: ImportRequest[] = [];
     const sourceName = "synthetic-fixture-eurusd.csv";
     const inspection: SourceInspection = {
@@ -179,7 +223,9 @@ describe("desktop shell navigation", () => {
     };
     mockIPC((command, payload) => {
       if (command === "get_foundation_status") return fixtureSnapshot;
-      if (command === "list_datasets") return imported ? [dataset] : [];
+      if (command === "start_dataset_catalog_verification") return { ...emptyCatalog, datasets: imported ? [dataset] : [], completed: imported ? 1 : 0, total: imported ? 1 : 0 };
+      if (command === "get_dataset_catalog_progress") return null;
+      if (command === "get_active_data_import") return activeImport;
       if (command === "list_import_attempts") return imported ? [{ attempt_id: "attempt", started_at_utc: "2026-10-17T00:00:00Z", completed_at_utc: "2026-10-17T00:00:01Z", status: "IMPORTED", source_file_name: sourceName, diagnostic_code: null, diagnostic_message: null }] : [];
       if (command === "select_data_source") return { selectionId: "opaque-fixture-token", fileName: sourceName };
       if (command === "inspect_selected_source") return { selectionId: "opaque-fixture-token", inspection };
@@ -187,10 +233,12 @@ describe("desktop shell navigation", () => {
         if (typeof payload === "object" && payload !== null && !Array.isArray(payload) && "request" in payload) {
           previewRequests.push((payload as Record<string, unknown>).request as ImportRequest);
         }
+        activeImport = { state: "PREPARED", session: preview };
         return preview;
       }
       if (command === "confirm_data_import") {
         imported = true;
+        activeImport = null;
         return { dataset_id: dataset.dataset_id, fingerprint: dataset.fingerprint, status: "READY", disposition: "IMPORTED" };
       }
       return undefined;
@@ -211,6 +259,11 @@ describe("desktop shell navigation", () => {
     expect(screen.getByText("No datasets registered yet.")).toBeTruthy();
     expect(screen.getByText(/Canonical Parquet SHA-256/)).toBeTruthy();
 
+    fireEvent.click(screen.getByRole("button", { name: /Overview/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Data Ground/ }));
+    expect(await screen.findByRole("heading", { name: /Audit complete/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Freeze and register dataset" })).toBeTruthy();
+
     fireEvent.click(screen.getByRole("button", { name: "Freeze and register dataset" }));
     expect(await screen.findByText(/Dataset frozen and registered/)).toBeTruthy();
     expect(screen.getByText("READY")).toBeTruthy();
@@ -226,7 +279,9 @@ describe("desktop shell navigation", () => {
     };
     mockIPC((command) => {
       if (command === "get_foundation_status") return fixtureSnapshot;
-      if (command === "list_datasets" || command === "list_import_attempts") return [];
+      if (command === "start_dataset_catalog_verification") return emptyCatalog;
+      if (command === "get_dataset_catalog_progress" || command === "get_active_data_import") return null;
+      if (command === "list_import_attempts") return [];
       if (command === "select_data_source") return { selectionId: "fixture-token", fileName: inspection.file_name };
       if (command === "inspect_selected_source") return { selectionId: "fixture-token", inspection };
       if (command === "preview_data_import") return {
@@ -264,7 +319,9 @@ describe("desktop shell navigation", () => {
     };
     mockIPC((command) => {
       if (command === "get_foundation_status") return fixtureSnapshot;
-      if (command === "list_datasets" || command === "list_import_attempts") return [];
+      if (command === "start_dataset_catalog_verification") return emptyCatalog;
+      if (command === "get_dataset_catalog_progress" || command === "get_active_data_import") return null;
+      if (command === "list_import_attempts") return [];
       if (command === "select_data_source") return { selectionId: "slow-fixture-token", fileName: inspection.file_name };
       if (command === "inspect_selected_source") return { selectionId: "slow-fixture-token", inspection };
       if (command === "preview_data_import") return new Promise((_resolve, reject) => { previewControl.reject = reject; });
@@ -292,6 +349,8 @@ describe("desktop shell navigation", () => {
       if (command === "get_foundation_status") {
         return Promise.reject(new Error("fixture IPC failure"));
       }
+      if (command === "start_dataset_catalog_verification") return emptyCatalog;
+      if (command === "get_active_data_import") return null;
       return undefined;
     });
     render(<App />);

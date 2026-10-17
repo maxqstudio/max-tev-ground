@@ -104,6 +104,19 @@ export interface ImportPreviewSession {
   preview: ImportPreview;
 }
 
+export type ActiveImportState =
+  | { state: "RUNNING"; jobId: string }
+  | { state: "PREPARED"; session: ImportPreviewSession };
+
+export interface DatasetCatalogProgress {
+  jobId: string;
+  status: "RUNNING" | "COMPLETED" | "CANCELLED" | "FAILED";
+  completed: number;
+  total: number;
+  datasets: DatasetCatalogEntry[];
+  error: string | null;
+}
+
 export interface DatasetManifest {
   schema_version: number;
   dataset_id: string;

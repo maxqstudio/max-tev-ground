@@ -813,6 +813,21 @@ struct FingerprintInput<'a> {
     quality_audit: &'a QualityAudit,
 }
 
+impl DatasetManifest {
+    pub fn fingerprint_is_valid(&self) -> bool {
+        let input = FingerprintInput {
+            schema_version: self.schema_version,
+            provenance: &self.provenance,
+            import_request: &self.import_request,
+            canonical_bars_fingerprint: &self.canonical_bars_fingerprint,
+            bar_count: self.bar_count,
+            series: &self.series,
+            quality_audit: &self.quality_audit,
+        };
+        serde_json::to_vec(&input).is_ok_and(|bytes| sha256_hex(&bytes) == self.fingerprint)
+    }
+}
+
 fn validate_source_path(path: &Path) -> Result<PathBuf, DataGroundError> {
     if !path.is_absolute()
         || path

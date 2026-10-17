@@ -5,7 +5,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use serde::Serialize;
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Error)]
 pub enum PersistenceError {
@@ -158,6 +158,30 @@ const MIGRATIONS: &[Migration] = &[
         END;
     ",
     },
+    Migration {
+        version: 5,
+        name: "crash_recoverable_dataset_promotions",
+        sql: "
+        CREATE TABLE dataset_promotions (
+            dataset_id TEXT PRIMARY KEY NOT NULL,
+            staging_name TEXT NOT NULL,
+            fingerprint TEXT NOT NULL CHECK (length(fingerprint) = 64),
+            manifest_json TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+            parquet_sha256 TEXT NOT NULL CHECK (length(parquet_sha256) = 64),
+            raw_sha256 TEXT NOT NULL CHECK (length(raw_sha256) = 64),
+            created_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('READY', 'BLOCKED', 'QUARANTINED')),
+            attempt_id TEXT NOT NULL UNIQUE,
+            attempt_started_at_utc TEXT NOT NULL,
+            attempt_completed_at_utc TEXT NOT NULL,
+            source_file_name TEXT NOT NULL,
+            diagnostic_code TEXT,
+            diagnostic_message TEXT
+        );
+        CREATE INDEX dataset_promotions_staging_idx ON dataset_promotions(staging_name);
+    ",
+    },
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,6 +205,13 @@ pub struct DatasetMetadata {
     pub created_at_utc: String,
     pub status: String,
     pub manifest_integrity_valid: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingDatasetPromotion {
+    pub staging_name: String,
+    pub dataset: DatasetMetadata,
+    pub attempt: ImportAttemptRecord,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -415,6 +446,219 @@ pub fn save_dataset_and_attempt(
     Ok(())
 }
 
+pub fn save_pending_dataset_promotion(
+    connection: &Connection,
+    pending: &PendingDatasetPromotion,
+) -> Result<(), PersistenceError> {
+    validate_dataset_metadata(&pending.dataset)?;
+    validate_imported_attempt(&pending.attempt)?;
+    if pending.staging_name.trim().is_empty()
+        || pending.staging_name.contains(['/', '\\'])
+        || pending.staging_name == "."
+        || pending.staging_name == ".."
+    {
+        return Err(PersistenceError::InvalidDatasetMetadata(
+            "promotion staging identity is invalid".into(),
+        ));
+    }
+    connection.execute(
+        "INSERT INTO dataset_promotions (
+            dataset_id, staging_name, fingerprint, manifest_json, manifest_sha256,
+            parquet_sha256, raw_sha256, created_at_utc, status, attempt_id,
+            attempt_started_at_utc, attempt_completed_at_utc, source_file_name,
+            diagnostic_code, diagnostic_message
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        rusqlite::params![
+            pending.dataset.dataset_id,
+            pending.staging_name,
+            pending.dataset.fingerprint,
+            pending.dataset.manifest_json,
+            pending.dataset.manifest_sha256,
+            pending.dataset.parquet_sha256,
+            pending.dataset.raw_sha256,
+            pending.dataset.created_at_utc,
+            pending.dataset.status,
+            pending.attempt.attempt_id,
+            pending.attempt.started_at_utc,
+            pending.attempt.completed_at_utc,
+            pending.attempt.source_file_name,
+            pending.attempt.diagnostic_code,
+            pending.attempt.diagnostic_message,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_pending_dataset_promotions(
+    connection: &Connection,
+) -> Result<Vec<PendingDatasetPromotion>, PersistenceError> {
+    let mut statement = connection.prepare(
+        "SELECT staging_name, dataset_id, fingerprint, manifest_json, manifest_sha256,
+                parquet_sha256, raw_sha256, created_at_utc, status, attempt_id,
+                attempt_started_at_utc, attempt_completed_at_utc, source_file_name,
+                diagnostic_code, diagnostic_message
+         FROM dataset_promotions ORDER BY dataset_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let manifest_json: String = row.get(3)?;
+        let manifest_sha256: String = row.get(4)?;
+        let actual = rg_contracts::Sha256Digest::of_bytes(manifest_json.as_bytes());
+        Ok(PendingDatasetPromotion {
+            staging_name: row.get(0)?,
+            dataset: DatasetMetadata {
+                dataset_id: row.get(1)?,
+                fingerprint: row.get(2)?,
+                manifest_json,
+                manifest_integrity_valid: manifest_sha256 == actual.as_str(),
+                manifest_sha256,
+                parquet_sha256: row.get(5)?,
+                raw_sha256: row.get(6)?,
+                created_at_utc: row.get(7)?,
+                status: row.get(8)?,
+            },
+            attempt: ImportAttemptRecord {
+                attempt_id: row.get(9)?,
+                started_at_utc: row.get(10)?,
+                completed_at_utc: row.get(11)?,
+                status: "IMPORTED".into(),
+                source_file_name: row.get(12)?,
+                diagnostic_code: row.get(13)?,
+                diagnostic_message: row.get(14)?,
+            },
+        })
+    })?;
+    let pending = rows.collect::<Result<Vec<_>, _>>()?;
+    for item in &pending {
+        validate_dataset_metadata(&item.dataset)?;
+        validate_imported_attempt(&item.attempt)?;
+        if item.staging_name.trim().is_empty()
+            || item.staging_name.contains(['/', '\\'])
+            || item.staging_name == "."
+            || item.staging_name == ".."
+        {
+            return Err(PersistenceError::InvalidDatasetMetadata(
+                "stored promotion staging identity is invalid".into(),
+            ));
+        }
+    }
+    Ok(pending)
+}
+
+pub fn clear_pending_dataset_promotion(
+    connection: &Connection,
+    dataset_id: &str,
+) -> Result<bool, PersistenceError> {
+    Ok(connection.execute(
+        "DELETE FROM dataset_promotions WHERE dataset_id = ?1",
+        [dataset_id],
+    )? == 1)
+}
+
+pub fn complete_pending_dataset_promotion(
+    connection: &mut Connection,
+    dataset_id: &str,
+) -> Result<(), PersistenceError> {
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let pending = {
+        let mut statement = tx.prepare(
+            "SELECT staging_name, dataset_id, fingerprint, manifest_json, manifest_sha256,
+                    parquet_sha256, raw_sha256, created_at_utc, status, attempt_id,
+                    attempt_started_at_utc, attempt_completed_at_utc, source_file_name,
+                    diagnostic_code, diagnostic_message
+             FROM dataset_promotions WHERE dataset_id = ?1",
+        )?;
+        let mut rows = statement.query([dataset_id])?;
+        rows.next()?
+            .map(|row| {
+                let manifest_json: String = row.get(3)?;
+                let manifest_sha256: String = row.get(4)?;
+                let actual = rg_contracts::Sha256Digest::of_bytes(manifest_json.as_bytes());
+                Ok::<PendingDatasetPromotion, rusqlite::Error>(PendingDatasetPromotion {
+                    staging_name: row.get(0)?,
+                    dataset: DatasetMetadata {
+                        dataset_id: row.get(1)?,
+                        fingerprint: row.get(2)?,
+                        manifest_integrity_valid: manifest_sha256 == actual.as_str(),
+                        manifest_json,
+                        manifest_sha256,
+                        parquet_sha256: row.get(5)?,
+                        raw_sha256: row.get(6)?,
+                        created_at_utc: row.get(7)?,
+                        status: row.get(8)?,
+                    },
+                    attempt: ImportAttemptRecord {
+                        attempt_id: row.get(9)?,
+                        started_at_utc: row.get(10)?,
+                        completed_at_utc: row.get(11)?,
+                        status: "IMPORTED".into(),
+                        source_file_name: row.get(12)?,
+                        diagnostic_code: row.get(13)?,
+                        diagnostic_message: row.get(14)?,
+                    },
+                })
+            })
+            .transpose()?
+    }
+    .ok_or_else(|| {
+        PersistenceError::InvalidDatasetMetadata(format!(
+            "pending promotion is missing for dataset {dataset_id}"
+        ))
+    })?;
+    validate_dataset_metadata(&pending.dataset)?;
+    validate_imported_attempt(&pending.attempt)?;
+    tx.execute(
+        "INSERT INTO datasets (
+            dataset_id, fingerprint, manifest_json, manifest_sha256, parquet_sha256,
+            raw_sha256, created_at_utc, status
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            pending.dataset.dataset_id,
+            pending.dataset.fingerprint,
+            pending.dataset.manifest_json,
+            pending.dataset.manifest_sha256,
+            pending.dataset.parquet_sha256,
+            pending.dataset.raw_sha256,
+            pending.dataset.created_at_utc,
+            pending.dataset.status,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO import_attempts (
+            attempt_id, started_at_utc, completed_at_utc, status, source_file_name,
+            diagnostic_code, diagnostic_message
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            pending.attempt.attempt_id,
+            pending.attempt.started_at_utc,
+            pending.attempt.completed_at_utc,
+            pending.attempt.status,
+            pending.attempt.source_file_name,
+            pending.attempt.diagnostic_code,
+            pending.attempt.diagnostic_message,
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM dataset_promotions WHERE dataset_id = ?1",
+        [dataset_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn validate_imported_attempt(attempt: &ImportAttemptRecord) -> Result<(), PersistenceError> {
+    if attempt.attempt_id.trim().is_empty()
+        || attempt.started_at_utc.trim().is_empty()
+        || attempt.completed_at_utc.trim().is_empty()
+        || attempt.source_file_name.trim().is_empty()
+        || attempt.status != "IMPORTED"
+    {
+        return Err(PersistenceError::InvalidDatasetMetadata(
+            "pending promotion requires immutable imported attempt metadata".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn save_import_attempt(
     connection: &Connection,
     attempt: &ImportAttemptRecord,
@@ -482,6 +726,26 @@ pub fn list_dataset_metadata(
          FROM datasets ORDER BY created_at_utc DESC, dataset_id",
     )?;
     let rows = statement.query_map([], dataset_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn list_dataset_metadata_after(
+    connection: &Connection,
+    after_dataset_id: &str,
+    limit: u64,
+) -> Result<Vec<DatasetMetadata>, PersistenceError> {
+    let limit = i64::try_from(limit).map_err(|_| {
+        PersistenceError::InvalidDatasetMetadata("dataset metadata page size is too large".into())
+    })?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection.prepare(
+        "SELECT dataset_id, fingerprint, manifest_json, manifest_sha256, parquet_sha256,
+                raw_sha256, created_at_utc, status
+         FROM datasets WHERE dataset_id > ?1 ORDER BY dataset_id LIMIT ?2",
+    )?;
+    let rows = statement.query_map(rusqlite::params![after_dataset_id, limit], dataset_from_row)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
@@ -629,7 +893,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
     }
 
     #[test]
@@ -766,7 +1030,7 @@ mod tests {
                     row.get(0)
                 })
                 .unwrap();
-            assert_eq!(migrations, 4);
+            assert_eq!(migrations, 5);
         }
     }
     #[test]
@@ -963,6 +1227,60 @@ mod tests {
                 [&attempt.attempt_id],
             )
             .is_err());
+    }
+
+    #[test]
+    fn pending_promotion_journal_completes_dataset_and_attempt_atomically() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let dataset = dataset_metadata();
+        let attempt = imported_attempt();
+        let pending = PendingDatasetPromotion {
+            staging_name: "018f4c4f-7d9b-7b9f-a70e-92bb7cf04c61".into(),
+            dataset: dataset.clone(),
+            attempt: attempt.clone(),
+        };
+        save_pending_dataset_promotion(&connection, &pending).unwrap();
+        assert_eq!(
+            list_pending_dataset_promotions(&connection).unwrap(),
+            vec![pending]
+        );
+        assert!(get_dataset_metadata(&connection, &dataset.dataset_id)
+            .unwrap()
+            .is_none());
+
+        complete_pending_dataset_promotion(&mut connection, &dataset.dataset_id).unwrap();
+        assert!(list_pending_dataset_promotions(&connection)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            get_dataset_metadata(&connection, &dataset.dataset_id).unwrap(),
+            Some(dataset)
+        );
+        assert_eq!(list_import_attempts(&connection).unwrap(), vec![attempt]);
+    }
+
+    #[test]
+    fn failed_pending_promotion_finalization_preserves_journal_for_retry() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let dataset = dataset_metadata();
+        save_dataset_and_attempt(&mut connection, &dataset, &imported_attempt()).unwrap();
+        let mut pending_attempt = imported_attempt();
+        pending_attempt.attempt_id = "attempt_pending_fixture".into();
+        let pending = PendingDatasetPromotion {
+            staging_name: "018f4c4f-7d9b-7b9f-a70e-92bb7cf04c61".into(),
+            dataset: dataset.clone(),
+            attempt: pending_attempt,
+        };
+        save_pending_dataset_promotion(&connection, &pending).unwrap();
+
+        assert!(complete_pending_dataset_promotion(&mut connection, &dataset.dataset_id).is_err());
+        assert_eq!(
+            list_pending_dataset_promotions(&connection).unwrap(),
+            vec![pending]
+        );
+        assert_eq!(list_import_attempts(&connection).unwrap().len(), 1);
     }
 
     #[test]

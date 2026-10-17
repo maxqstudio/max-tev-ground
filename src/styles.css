@@ -1234,6 +1234,23 @@ h1 {
   margin-left: auto;
 }
 
+.catalog-progress {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid #e2e9df;
+  border-radius: 6px;
+  color: #657365;
+  background: #fbfcfa;
+  font-size: 10px;
+}
+
+.catalog-progress .button {
+  margin-left: auto;
+}
+
 .empty-registry {
   display: flex;
   min-height: 58px;
