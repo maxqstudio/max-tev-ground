@@ -16,7 +16,7 @@ $environmentNames = @(
     "RG_STEP_msvc_import", "RG_STEP_tauri_build"
 )
 $phaseText = Get-Content -LiteralPath (Join-Path $root "PHASE_MANIFEST.yaml") -Raw
-$gateSection = [regex]::Match($phaseText, '(?ms)^acceptance_gates:\s*(.*?)(?=^\S|\z)')
+$gateSection = [regex]::Match($phaseText, '(?ms)^acceptance_gates:[ \t]*\r?\n(.*?)(?=^\S|\z)')
 if (-not $gateSection.Success) { throw "Could not read phase acceptance gates" }
 $gateIds = @([regex]::Matches($gateSection.Groups[1].Value, '(?m)^\s+- id:\s*([a-z0-9_]+)\s*$') | ForEach-Object { $_.Groups[1].Value })
 foreach ($id in $gateIds) { $environmentNames += "RG_GATE_$id" }

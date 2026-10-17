@@ -72,7 +72,7 @@ $implementationSource = Get-Content -LiteralPath $implementationPath -Raw
 $phaseSource = Get-Content -LiteralPath $phaseManifestPath -Raw
 $phaseMatch = [regex]::Match($implementationSource, '(?m)^current_phase:\s*(RG-R\d{2})\s*$')
 $uiMatch = [regex]::Match($implementationSource, '(?m)^owner_ui_status:\s*([A-Z_]+)\s*$')
-$gateSection = [regex]::Match($phaseSource, '(?ms)^acceptance_gates:\s*(.*?)(?=^\S|\z)')
+$gateSection = [regex]::Match($phaseSource, '(?ms)^acceptance_gates:[ \t]*\r?\n(.*?)(?=^\S|\z)')
 if (-not $phaseMatch.Success -or -not $uiMatch.Success -or -not $gateSection.Success) {
     throw "Cannot resolve active phase, Owner UI status, or mandatory acceptance gates"
 }
