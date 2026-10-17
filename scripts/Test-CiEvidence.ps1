@@ -81,7 +81,7 @@ try {
     $skippedDirectory = Join-Path $fixtureRoot "skipped"
     & $generator -OutputDirectory $skippedDirectory
     $skipped = Get-Content -LiteralPath (Join-Path $skippedDirectory "acceptance.json") -Raw | ConvertFrom-Json
-    if (($skipped.gates | Where-Object id -eq "frontend").status -ne "NOT_RUN") { throw "Skipped frontend gate was presented as passing" }
+    if ($skipped.automated_status -ne "NOT_RUN") { throw "A skipped mandatory validation suite was presented as passing" }
 
     Write-Host "CI_EVIDENCE_CONTRACT_TESTS=PASS"
 } finally {
