@@ -140,7 +140,7 @@ pub enum ActiveImportState {
         job_id: String,
     },
     Prepared {
-        session: ImportPreviewSession,
+        session: Box<ImportPreviewSession>,
     },
 }
 
@@ -158,10 +158,10 @@ impl DataGroundState {
             .next()
         {
             return Ok(Some(ActiveImportState::Prepared {
-                session: ImportPreviewSession {
+                session: Box::new(ImportPreviewSession {
                     job_id: job_id.clone(),
                     preview: prepared.prepared.preview.clone(),
-                },
+                }),
             }));
         }
         let running = self
