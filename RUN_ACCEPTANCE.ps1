@@ -141,7 +141,20 @@ Invoke-LoggedGate "Frontend unit tests" { npm test -- --run }
 Invoke-LoggedGate "Frontend production build" { npm run build }
 
 if ($msvcReady) {
-    Invoke-LoggedGate "Tauri desktop build without packaging" { npm run tauri -- build --no-bundle }
+    Invoke-LoggedGate "Tauri desktop build without packaging" {
+        $previousCargoTarget = $env:CARGO_TARGET_DIR
+        try {
+            $env:CARGO_TARGET_DIR = Join-Path $EvidenceDir "tauri-target"
+            npm run tauri -- build --no-bundle
+        }
+        finally {
+            if ($null -eq $previousCargoTarget) {
+                Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+            } else {
+                $env:CARGO_TARGET_DIR = $previousCargoTarget
+            }
+        }
+    }
 } else {
     Add-Result "Tauri desktop build without packaging" "ENVIRONMENT_BLOCKED" "Requires the MSVC x64 developer environment"
 }
