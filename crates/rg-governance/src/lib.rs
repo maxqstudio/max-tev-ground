@@ -725,4 +725,54 @@ mod tests {
     fn embedded_sources_validate_at_build_revision() {
         assert!(validate_project(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).is_ok());
     }
+
+    #[test]
+    fn ci_workflow_is_valid_yaml_and_uses_unique_step_and_evidence_keys() {
+        let source = include_str!("../../../.github/workflows/research-ground.yml");
+        let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(source).unwrap();
+        let jobs_key = serde_yaml_ng::Value::String("jobs".into());
+        let jobs = document
+            .as_mapping()
+            .and_then(|mapping| mapping.get(&jobs_key))
+            .and_then(serde_yaml_ng::Value::as_mapping)
+            .expect("workflow declares a jobs mapping");
+        assert!(jobs.contains_key(&serde_yaml_ng::Value::String("windows-foundation".into())));
+
+        let step_ids: Vec<_> = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("id: "))
+            .collect();
+        assert_eq!(
+            step_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            step_ids.len(),
+            "workflow step IDs must be unique"
+        );
+
+        let evidence_step = source
+            .split("name: Write source-bound acceptance evidence")
+            .nth(1)
+            .expect("workflow writes source-bound evidence");
+        let evidence_environment = evidence_step
+            .split("run: ./scripts/New-CiEvidence.ps1")
+            .next()
+            .expect("evidence writer has an environment block");
+        let environment_keys: Vec<_> = evidence_environment
+            .lines()
+            .filter_map(|line| {
+                let key = line.trim().split_once(':')?.0;
+                (key.starts_with("RG_STEP_") || key.starts_with("RG_GATE_")).then_some(key)
+            })
+            .collect();
+        assert_eq!(
+            environment_keys
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            environment_keys.len(),
+            "evidence environment keys must be unique"
+        );
+    }
 }

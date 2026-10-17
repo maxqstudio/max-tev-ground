@@ -178,7 +178,6 @@ jobs:
           RG_STEP_rust_fmt: ${{ steps.rust_fmt.outcome }}
           RG_STEP_roadmap_governance: ${{ steps.roadmap_governance.outcome }}
           RG_STEP_reproducible_acceptance: ${{ steps.reproducible_acceptance.outcome }}
-          RG_STEP_reproducible_acceptance: ${{ steps.reproducible_acceptance.outcome }}
           RG_STEP_rust_tests: ${{ steps.rust_tests.outcome }}
           RG_STEP_rust_clippy: ${{ steps.rust_clippy.outcome }}
           RG_STEP_rust_build: ${{ steps.rust_build.outcome }}
@@ -189,7 +188,6 @@ jobs:
           RG_STEP_frontend_build: ${{ steps.frontend_build.outcome }}
           RG_STEP_msvc_import: ${{ steps.msvc_import.outcome }}
           RG_STEP_tauri_build: ${{ steps.tauri_build.outcome }}
-          RG_GATE_reproducible_acceptance: ${{ steps.reproducible_acceptance.outcome }}
           RG_GATE_reproducible_acceptance: ${{ steps.reproducible_acceptance.outcome }}
         run: ./scripts/New-CiEvidence.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'rg-r01-evidence')
 
