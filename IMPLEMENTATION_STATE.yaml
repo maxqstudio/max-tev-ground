@@ -1,7 +1,7 @@
 schema_version: 3
 current_phase: RG-R01
 builder_status: IMPLEMENTED
-automated_status: NOT_RUN
+automated_status: AUTOMATED_PASS
 owner_ui_status: PENDING
 owner_acceptance: PENDING
 next_phase_unlocked: false
@@ -14,7 +14,7 @@ deliverables:
   dataset_registry: TESTED
   persistence: TESTED
   data_ground_ui: TESTED
-  acceptance_evidence: IMPLEMENTED
+  acceptance_evidence: TESTED
 accepted_phases:
   - phase: RG-R00
     owner_acceptance: OWNER_ACCEPTED
