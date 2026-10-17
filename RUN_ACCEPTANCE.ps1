@@ -131,8 +131,7 @@ if ($webviewVersion) {
 Invoke-LoggedGate "Rust formatting" { cargo fmt --all -- --check }
 Invoke-LoggedGate "Roadmap governance" { cargo run --locked -p rg-governance --bin rg-governance -- --check }
 Invoke-LoggedGate "CI evidence contract tests" {
-    $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
-    & $powershell -NoProfile -File (Join-Path $Root "scripts\Test-CiEvidence.ps1")
+    & (Join-Path $Root "scripts\Test-CiEvidence.ps1")
 }
 Invoke-LoggedGate "Rust workspace tests" { cargo test --workspace --locked }
 Invoke-LoggedGate "Rust lint" { cargo clippy --workspace --all-targets --locked -- -D warnings }
