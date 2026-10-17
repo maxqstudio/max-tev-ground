@@ -17,5 +17,6 @@ Roadmap drift and interactive desktop automation can otherwise create false comp
 
 - RG-R00 remains active until Owner acceptance.
 - RG-R01 stays locked even after local automated tests pass.
-- If an official remote is configured, CI starts PENDING and is recorded PASS only after the workflow succeeds for the exact commit. If no official remote is configured, CI remains NOT_CONFIGURED; no remote is invented.
+- `PHASE_MANIFEST.yaml` schema 2 requires a non-empty evidence description for each unique acceptance gate; the RG-R00 gate set is validated against all nine mandatory IDs. `IMPLEMENTATION_STATE.yaml` schema 2 removes the manually editable CI status.
+- CI status is not recorded as a manually editable project field. GitHub Actions publishes a source-SHA-bound acceptance report and checksum artifact, then stores a signed artifact attestation for that report. The attestation and workflow run provide the external CI status for that exact source revision.
 - Automated tests, desktop compilation, Owner UI acceptance, and trading-edge evidence remain distinct.

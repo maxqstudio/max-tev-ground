@@ -13,7 +13,6 @@ const fixtureSnapshot: FoundationSnapshot = {
   automated_status: "AUTOMATED_PASS",
   owner_ui_status: "PENDING",
   owner_acceptance: "PENDING",
-  ci_status: "NOT_CONFIGURED",
   next_phase_unlocked: false,
   deliverables: {
     foundation: "VERIFIED",
@@ -56,7 +55,7 @@ describe("desktop shell navigation", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "MAX Research Ground" })).toBeTruthy();
     expect(screen.getByText("AUTOMATED PASS")).toBeTruthy();
-    expect(screen.getByText("LOCKED")).toBeTruthy();
+    expect(screen.getAllByText("LOCKED")).toHaveLength(2);
     expect(screen.getByText("Research contracts")).toBeTruthy();
   });
 

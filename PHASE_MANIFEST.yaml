@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 phase: RG-R00
 lifecycle: ACTIVE
 deliverables:
@@ -11,19 +11,28 @@ deliverables:
 acceptance_gates:
   - id: rust_workspace
     requirement: Rust workspace builds and its tests pass on the exact candidate.
+    evidence: RUN_ACCEPTANCE.ps1 logs and the matching source-SHA-bound GitHub Actions acceptance artifact.
   - id: frontend
     requirement: Frontend lint, typecheck, tests, and production build pass.
+    evidence: RUN_ACCEPTANCE.ps1 logs and the matching source-SHA-bound GitHub Actions acceptance artifact.
   - id: tauri_build
     requirement: Tauri desktop binary builds, or records an evidenced environment block.
+    evidence: Tauri build log or an explicit environment-blocked result tied to the exact source SHA.
   - id: persistence
     requirement: SQLite schema versioning, migrations, rollback, and failure handling pass.
+    evidence: Rust persistence unit-test results, including migration rollback, database triggers, and tamper detection.
   - id: contracts
     requirement: Versioned research contracts and serialization validation pass.
+    evidence: Rust contract serialization and validation unit-test results on the exact source SHA.
   - id: roadmap_governance
     requirement: Roadmap, phase manifest, implementation state, and generated documentation agree.
+    evidence: Governance validator output plus its negative tests and generated ROADMAP.md comparison.
   - id: baseline_read_only
     requirement: The prior MAX_JEV_BENCHMARK research baseline remains read-only and untouched.
+    evidence: Acceptance report records that its runner did not open the legacy path; Owner confirmation covers host state outside GitHub CI.
   - id: exact_source_evidence
     requirement: Acceptance evidence names the exact clean source commit and tree.
+    evidence: GitHub Actions acceptance.json records the event SHA, Git tree SHA, workflow run, and clean checkout; SHA256SUMS.txt checks the report.
   - id: owner_ui_acceptance
     requirement: Owner reviews the desktop UI; automated tests do not substitute for this gate.
+    evidence: Owner's interactive UI review is recorded separately; automated acceptance leaves this gate pending.

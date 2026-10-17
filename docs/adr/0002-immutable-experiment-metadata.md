@@ -5,7 +5,7 @@
 
 ## Decision
 
-SQLite stores versioned experiment manifest JSON, its SHA-256 digest, source revision, creation time, and lifecycle status. A primary-key collision is an error; existing experiment metadata is never overwritten. Schema migrations are versioned, checksummed, and applied in transactions.
+SQLite stores versioned experiment manifest JSON, its SHA-256 digest, source revision, creation time, and lifecycle status. A primary-key collision is an error; database triggers reject every UPDATE and DELETE, and reads verify the manifest digest. Schema migrations are versioned, checksummed, and applied in transactions. Schema version 2 adds the triggers without changing the version 1 migration checksum.
 
 Historical market bars are out of scope for this phase. The later Data Ground phase owns Parquet ingestion and dataset lineage.
 

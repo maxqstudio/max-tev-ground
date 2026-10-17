@@ -1,10 +1,9 @@
-schema_version: 1
+schema_version: 2
 current_phase: RG-R00
 builder_status: IMPLEMENTED
 automated_status: AUTOMATED_PASS
 owner_ui_status: PENDING
 owner_acceptance: PENDING
-ci_status: PENDING
 next_phase_unlocked: false
 deliverables:
   foundation: VERIFIED

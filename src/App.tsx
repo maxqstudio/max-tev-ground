@@ -179,7 +179,7 @@ function Overview({
               <Fact label="Automated gates" value={statusLabel(snapshot.automated_status)} />
               <Fact label="Owner UI review" value={statusLabel(snapshot.owner_ui_status)} />
               <Fact label="Owner acceptance" value={statusLabel(snapshot.owner_acceptance)} />
-              <Fact label="CI" value={statusLabel(snapshot.ci_status)} />
+              <Fact label="Next phase" value={snapshot.next_phase_unlocked ? "UNLOCKED" : "LOCKED"} />
             </div>
             <div className="status-footnote">
               RG-R01 remains locked until the Owner accepts this checkpoint.

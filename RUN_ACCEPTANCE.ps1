@@ -130,6 +130,10 @@ if ($webviewVersion) {
 
 Invoke-LoggedGate "Rust formatting" { cargo fmt --all -- --check }
 Invoke-LoggedGate "Roadmap governance" { cargo run --locked -p rg-governance --bin rg-governance -- --check }
+Invoke-LoggedGate "CI evidence contract tests" {
+    $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+    & $powershell -NoProfile -File (Join-Path $Root "scripts\Test-CiEvidence.ps1")
+}
 Invoke-LoggedGate "Rust workspace tests" { cargo test --workspace --locked }
 Invoke-LoggedGate "Rust lint" { cargo clippy --workspace --all-targets --locked -- -D warnings }
 Invoke-LoggedGate "Rust workspace build" { cargo build --workspace --locked }
@@ -159,17 +163,13 @@ if ($msvcReady) {
     Add-Result "Tauri desktop build without packaging" "ENVIRONMENT_BLOCKED" "Requires the MSVC x64 developer environment"
 }
 
-$remotes = @(git remote)
-$ciStatus = if ($remotes.Count -eq 0) { "NOT_CONFIGURED" } else { "PENDING" }
 $baselinePath = "D:\MAX_JEV_BENCHMARK\JEV_TEV_EURUSD_H1_LAST2M"
-$baselineExists = Test-Path -LiteralPath $baselinePath
 $report = [ordered]@{
     schema_version = 1
     phase = "RG-R00"
     automated_status = "NOT_RUN"
     owner_ui_status = "OWNER_UI_ACCEPTANCE_PENDING"
     owner_acceptance = "PENDING"
-    ci_status = $ciStatus
     next_phase_unlocked = $false
     started_utc = $StartedUtc.ToString("o")
     completed_utc = [DateTime]::UtcNow.ToString("o")
@@ -179,7 +179,6 @@ $report = [ordered]@{
         commit_sha = $commit
         tree_sha = $tree
         clean = $true
-        remotes = $remotes
     }
     environment = [ordered]@{
         rust = $rustVersion
@@ -190,8 +189,8 @@ $report = [ordered]@{
     }
     legacy_baseline = [ordered]@{
         path = $baselinePath
-        exists = $baselineExists
         accessed_by_runner = $false
+        evidence_limit = "The runner does not inspect host state outside the repository and cannot attest to activity by other processes."
     }
     gates = @($script:GateResults)
 }
@@ -210,7 +209,6 @@ Write-Host ""
 Write-Host "AUTOMATED_STATUS=$($report.automated_status)"
 Write-Host "OWNER_UI_STATUS=$($report.owner_ui_status)"
 Write-Host "OWNER_ACCEPTANCE=$($report.owner_acceptance)"
-Write-Host "CI_STATUS=$ciStatus"
 Write-Host "SOURCE_COMMIT=$commit"
 Write-Host "SOURCE_TREE=$tree"
 Write-Host "EVIDENCE=$reportPath"

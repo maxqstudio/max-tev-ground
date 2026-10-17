@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 const ROADMAP_SOURCE: &str = include_str!("../../../ROADMAP.yaml");
 const PHASE_SOURCE: &str = include_str!("../../../PHASE_MANIFEST.yaml");
 const IMPLEMENTATION_SOURCE: &str = include_str!("../../../IMPLEMENTATION_STATE.yaml");
+const REQUIRED_RG_R00_GATES: [&str; 9] = [
+    "rust_workspace",
+    "frontend",
+    "tauri_build",
+    "persistence",
+    "contracts",
+    "roadmap_governance",
+    "baseline_read_only",
+    "exact_source_evidence",
+    "owner_ui_acceptance",
+];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +69,7 @@ pub struct PhaseManifest {
 pub struct AcceptanceGate {
     pub id: String,
     pub requirement: String,
+    pub evidence: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -69,7 +81,6 @@ pub struct ImplementationState {
     pub automated_status: AutomatedStatus,
     pub owner_ui_status: OwnerUiStatus,
     pub owner_acceptance: OwnerUiStatus,
-    pub ci_status: CiStatus,
     pub next_phase_unlocked: bool,
     pub deliverables: BTreeMap<String, DeliveryStatus>,
 }
@@ -99,15 +110,6 @@ pub enum OwnerUiStatus {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum CiStatus {
-    NotConfigured,
-    Pending,
-    Pass,
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DeliveryStatus {
     Planned,
     Implemented,
@@ -126,7 +128,6 @@ pub struct GovernanceSnapshot {
     pub automated_status: AutomatedStatus,
     pub owner_ui_status: OwnerUiStatus,
     pub owner_acceptance: OwnerUiStatus,
-    pub ci_status: CiStatus,
     pub next_phase_unlocked: bool,
     pub deliverables: BTreeMap<String, DeliveryStatus>,
     pub pages: Vec<PageSnapshot>,
@@ -165,9 +166,9 @@ pub fn validate_project(root: impl AsRef<Path>) -> Result<GovernanceSnapshot, St
 }
 
 pub fn render_roadmap(roadmap: &Roadmap) -> String {
-    let mut output = String::from(
-        "# MAX Research Ground roadmap\n\n\
-         Generated from ROADMAP.yaml. RG-R00 is the only active phase; later phases stay locked until the Owner accepts the current checkpoint and authorizes progression.\n\n",
+    let mut output = format!(
+        "# MAX Research Ground roadmap\n\nGenerated from ROADMAP.yaml. Current active phase: {}. Later phases stay locked until the Owner accepts the current checkpoint and authorizes progression.\n\n",
+        roadmap.current_phase
     );
     for phase in &roadmap.phases {
         output.push_str(&format!(
@@ -208,8 +209,8 @@ fn validate_sync(
     implementation: &ImplementationState,
 ) -> Result<(), String> {
     if roadmap.schema_version != 1
-        || phase.schema_version != 1
-        || implementation.schema_version != 1
+        || phase.schema_version != 2
+        || implementation.schema_version != 2
     {
         return Err("unsupported governance schema version".into());
     }
@@ -275,8 +276,8 @@ fn validate_sync(
     if phase.lifecycle != active[0].lifecycle {
         return Err("phase manifest lifecycle is out of sync with roadmap".into());
     }
-    if phase.deliverables.is_empty() || phase.acceptance_gates.is_empty() {
-        return Err("phase manifest must declare deliverables and acceptance gates".into());
+    if phase.deliverables.is_empty() {
+        return Err("phase manifest must declare deliverables".into());
     }
     if phase
         .deliverables
@@ -287,21 +288,12 @@ fn validate_sync(
     {
         return Err("phase manifest contains duplicate deliverables".into());
     }
-    if phase
-        .acceptance_gates
-        .iter()
-        .any(|gate| gate.id.trim().is_empty() || gate.requirement.trim().is_empty())
-    {
-        return Err("phase manifest contains an empty acceptance gate".into());
-    }
+    validate_acceptance_gates(phase)?;
     let declared: std::collections::BTreeSet<_> = phase.deliverables.iter().cloned().collect();
     let recorded: std::collections::BTreeSet<_> =
         implementation.deliverables.keys().cloned().collect();
     if declared != recorded {
         return Err("phase manifest and implementation state deliverables are out of sync".into());
-    }
-    if implementation.schema_version != 1 {
-        return Err("unsupported implementation state schema version".into());
     }
     if implementation.owner_acceptance == OwnerUiStatus::OwnerAccepted
         && implementation.owner_ui_status != OwnerUiStatus::OwnerAccepted
@@ -309,7 +301,43 @@ fn validate_sync(
         return Err("Owner acceptance cannot precede Owner UI acceptance".into());
     }
     if implementation.next_phase_unlocked {
-        return Err("RG-R00 must not unlock RG-R01 automatically".into());
+        return Err("implementation state must not unlock a later phase automatically".into());
+    }
+    Ok(())
+}
+
+fn validate_acceptance_gates(phase: &PhaseManifest) -> Result<(), String> {
+    if phase.acceptance_gates.is_empty() {
+        return Err("phase manifest must declare acceptance gates".into());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for gate in &phase.acceptance_gates {
+        let id = gate.id.trim();
+        if id.is_empty()
+            || gate.id != id
+            || gate.requirement.trim().is_empty()
+            || gate.evidence.trim().is_empty()
+        {
+            return Err("phase manifest contains an acceptance gate without an ID, requirement, or evidence".into());
+        }
+        if !ids.insert(id) {
+            return Err(format!(
+                "phase manifest contains duplicate acceptance gate ID: {id}"
+            ));
+        }
+    }
+    if phase.phase == "RG-R00" {
+        let missing: Vec<_> = REQUIRED_RG_R00_GATES
+            .iter()
+            .filter(|required| !ids.contains(**required))
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "RG-R00 is missing mandatory acceptance gates: {}",
+                missing.join(", ")
+            ));
+        }
     }
     Ok(())
 }
@@ -329,7 +357,6 @@ fn snapshot(documents: Documents) -> Result<GovernanceSnapshot, String> {
         automated_status: documents.implementation.automated_status,
         owner_ui_status: documents.implementation.owner_ui_status,
         owner_acceptance: documents.implementation.owner_acceptance,
-        ci_status: documents.implementation.ci_status,
         next_phase_unlocked: documents.implementation.next_phase_unlocked,
         deliverables: documents.implementation.deliverables,
         pages: vec![
@@ -411,6 +438,16 @@ mod tests {
     }
 
     #[test]
+    fn gate_evidence_and_ci_state_require_their_new_schema_versions() {
+        let old_phase_schema = PHASE_SOURCE.replacen("schema_version: 2", "schema_version: 1", 1);
+        assert!(parse_documents(ROADMAP_SOURCE, &old_phase_schema, IMPLEMENTATION_SOURCE).is_err());
+
+        let old_implementation_schema =
+            IMPLEMENTATION_SOURCE.replacen("schema_version: 2", "schema_version: 1", 1);
+        assert!(parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &old_implementation_schema).is_err());
+    }
+
+    #[test]
     fn implementation_deliverables_must_match_phase_manifest() {
         let changed = IMPLEMENTATION_SOURCE
             .lines()
@@ -422,12 +459,72 @@ mod tests {
 
     #[test]
     fn generated_document_has_a_single_active_phase_statement() {
-        let roadmap: Roadmap = serde_yaml_ng::from_str(ROADMAP_SOURCE).unwrap();
+        let mut roadmap: Roadmap = serde_yaml_ng::from_str(ROADMAP_SOURCE).unwrap();
         let generated = render_roadmap(&roadmap);
-        assert!(generated.contains("RG-R00 is the only active phase"));
+        assert!(generated.contains("Current active phase: RG-R00"));
         assert!(generated.contains("RG-R08"));
         assert!(generated.ends_with('\n'));
         assert!(!generated.ends_with("\n\n"));
+
+        roadmap.current_phase = "RG-R03".into();
+        for phase in &mut roadmap.phases {
+            match phase.id.as_str() {
+                "RG-R00" | "RG-R01" | "RG-R02" => {
+                    phase.lifecycle = Lifecycle::Accepted;
+                    phase.acceptance_evidence = Some("fixture evidence".into());
+                }
+                "RG-R03" => {
+                    phase.lifecycle = Lifecycle::Active;
+                    phase.acceptance_evidence = None;
+                }
+                _ => {
+                    phase.lifecycle = Lifecycle::Planned;
+                    phase.acceptance_evidence = None;
+                }
+            }
+        }
+        let generated_later_phase = render_roadmap(&roadmap);
+        assert!(generated_later_phase.contains("Current active phase: RG-R03"));
+        assert!(
+            generated_later_phase.contains("## RG-R03 — Deterministic Strategy Engine (ACTIVE)")
+        );
+        assert!(generated_later_phase
+            .contains("## RG-R00 — Rust foundation, Tauri shell, governance, CI (ACCEPTED)"));
+        assert!(!generated_later_phase.contains("RG-R00 is the only active phase"));
+    }
+
+    #[test]
+    fn rg_r00_gate_set_cannot_lose_a_mandatory_gate() {
+        let mut phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
+        phase
+            .acceptance_gates
+            .retain(|gate| gate.id != "owner_ui_acceptance");
+        let error = validate_acceptance_gates(&phase).unwrap_err();
+        assert!(error.contains("owner_ui_acceptance"));
+    }
+
+    #[test]
+    fn acceptance_gate_ids_must_be_unique() {
+        let mut phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
+        let duplicate = phase
+            .acceptance_gates
+            .iter()
+            .find(|gate| gate.id == "rust_workspace")
+            .unwrap()
+            .clone();
+        phase.acceptance_gates.push(duplicate);
+        assert!(validate_acceptance_gates(&phase)
+            .unwrap_err()
+            .contains("duplicate acceptance gate ID"));
+    }
+
+    #[test]
+    fn every_acceptance_gate_requires_evidence() {
+        let mut phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
+        phase.acceptance_gates[0].evidence.clear();
+        assert!(validate_acceptance_gates(&phase)
+            .unwrap_err()
+            .contains("evidence"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use rg_contracts::ExperimentManifest;
 use rusqlite::{Connection, TransactionBehavior};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum PersistenceError {
@@ -22,6 +22,8 @@ pub enum PersistenceError {
     MigrationChecksumMismatch(u32),
     #[error("experiment ID already exists: {0}")]
     ExperimentAlreadyExists(String),
+    #[error("stored manifest SHA-256 does not match manifest bytes for experiment: {0}")]
+    ManifestChecksumMismatch(String),
 }
 
 #[derive(Clone, Copy)]
@@ -31,10 +33,11 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "experiment_metadata_foundation",
-    sql: "
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "experiment_metadata_foundation",
+        sql: "
         CREATE TABLE experiments (
             experiment_id TEXT PRIMARY KEY NOT NULL,
             schema_version INTEGER NOT NULL CHECK (schema_version > 0),
@@ -47,7 +50,24 @@ const MIGRATIONS: &[Migration] = &[Migration {
         CREATE INDEX experiments_created_at_idx
             ON experiments(created_at_utc DESC, experiment_id);
     ",
-}];
+    },
+    Migration {
+        version: 2,
+        name: "immutable_experiment_metadata_triggers",
+        sql: "
+        CREATE TRIGGER experiments_prevent_update
+        BEFORE UPDATE ON experiments
+        BEGIN
+            SELECT RAISE(ABORT, 'experiment metadata is immutable');
+        END;
+        CREATE TRIGGER experiments_prevent_delete
+        BEFORE DELETE ON experiments
+        BEGIN
+            SELECT RAISE(ABORT, 'experiment metadata is immutable');
+        END;
+    ",
+    },
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredExperiment {
@@ -200,14 +220,21 @@ pub fn get_experiment_metadata(
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
-    Ok(Some(StoredExperiment {
+    let stored = StoredExperiment {
         experiment_id: row.get(0)?,
         manifest_json: row.get(1)?,
         manifest_sha256: row.get(2)?,
         created_at_utc: row.get(3)?,
         source_revision: row.get(4)?,
         status: row.get(5)?,
-    }))
+    };
+    let expected_sha256 = rg_contracts::Sha256Digest::of_bytes(stored.manifest_json.as_bytes());
+    if stored.manifest_sha256 != expected_sha256.as_str() {
+        return Err(PersistenceError::ManifestChecksumMismatch(
+            stored.experiment_id,
+        ));
+    }
+    Ok(Some(stored))
 }
 
 fn checksum(value: &str) -> String {
@@ -291,7 +318,42 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn version_one_database_upgrades_without_changing_its_migration_checksum() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        assert_eq!(
+            migrate_with(&mut connection, &MIGRATIONS[..1], 1).unwrap(),
+            1
+        );
+        let checksum_before: String = connection
+            .query_row(
+                "SELECT checksum FROM schema_migrations WHERE version = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(migrate(&mut connection).unwrap(), CURRENT_SCHEMA_VERSION);
+        let checksum_after: String = connection
+            .query_row(
+                "SELECT checksum FROM schema_migrations WHERE version = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(checksum_before, checksum_after);
+        assert_eq!(schema_version(&connection).unwrap(), CURRENT_SCHEMA_VERSION);
+        let trigger_count: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'experiments'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_count, 2);
     }
 
     #[test]
@@ -350,7 +412,7 @@ mod tests {
                     row.get(0)
                 })
                 .unwrap();
-            assert_eq!(migrations, 1);
+            assert_eq!(migrations, 2);
         }
     }
     #[test]
@@ -386,5 +448,93 @@ mod tests {
                 .unwrap(),
             stored
         );
+    }
+
+    #[test]
+    fn sqlite_rejects_direct_update_and_delete_of_experiment_metadata() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let manifest = manifest();
+        let stored = save_experiment_metadata(
+            &connection,
+            &manifest,
+            "2026-10-17T00:00:00Z",
+            "fixture-revision",
+        )
+        .unwrap();
+
+        assert!(connection
+            .execute(
+                "UPDATE experiments SET status = 'FAILED' WHERE experiment_id = ?1",
+                [manifest.experiment_id.as_str()],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "DELETE FROM experiments WHERE experiment_id = ?1",
+                [manifest.experiment_id.as_str()],
+            )
+            .is_err());
+        assert_eq!(
+            get_experiment_metadata(&connection, manifest.experiment_id.as_str()).unwrap(),
+            Some(stored)
+        );
+    }
+
+    #[test]
+    fn metadata_read_detects_manifest_tampering() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let manifest = manifest();
+        save_experiment_metadata(
+            &connection,
+            &manifest,
+            "2026-10-17T00:00:00Z",
+            "fixture-revision",
+        )
+        .unwrap();
+
+        // Simulate an out-of-band database file edit that bypassed the installed trigger.
+        connection
+            .execute_batch(
+                "DROP TRIGGER experiments_prevent_update;
+                 UPDATE experiments SET manifest_json = manifest_json || ' ';",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            get_experiment_metadata(&connection, manifest.experiment_id.as_str()),
+            Err(PersistenceError::ManifestChecksumMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn failed_second_migration_rolls_back_its_ddl_version_and_ledger_entry() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let broken = [
+            MIGRATIONS[0],
+            Migration {
+                version: 2,
+                name: "intentional_failure_fixture",
+                sql: "CREATE TRIGGER must_rollback BEFORE UPDATE ON experiments BEGIN SELECT RAISE(ABORT, 'blocked'); END; INSERT INTO missing_table VALUES (1);",
+            },
+        ];
+        assert!(migrate_with(&mut connection, &broken, 2).is_err());
+
+        assert_eq!(schema_version(&connection).unwrap(), 1);
+        let applied: u32 = connection
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(applied, 1);
+        let trigger_exists: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='must_rollback'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_exists, 0);
     }
 }

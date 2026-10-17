@@ -23,7 +23,6 @@ export interface FoundationSnapshot {
     | "FAILED";
   owner_ui_status: "PENDING" | "OWNER_ACCEPTED";
   owner_acceptance: "PENDING" | "OWNER_ACCEPTED";
-  ci_status: "NOT_CONFIGURED" | "PENDING" | "PASS" | "FAILED";
   next_phase_unlocked: boolean;
   deliverables: Record<string, DeliveryStatus>;
   pages: PageSnapshot[];

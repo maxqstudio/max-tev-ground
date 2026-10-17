@@ -1,6 +1,6 @@
 # MAX Research Ground roadmap
 
-Generated from ROADMAP.yaml. RG-R00 is the only active phase; later phases stay locked until the Owner accepts the current checkpoint and authorizes progression.
+Generated from ROADMAP.yaml. Current active phase: RG-R00. Later phases stay locked until the Owner accepts the current checkpoint and authorizes progression.
 
 ## RG-R00 — Rust foundation, Tauri shell, governance, CI (ACTIVE)
 
