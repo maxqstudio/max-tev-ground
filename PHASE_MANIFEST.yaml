@@ -1,38 +1,53 @@
-schema_version: 2
-phase: RG-R00
+schema_version: 3
+phase: RG-R01
 lifecycle: ACTIVE
 deliverables:
-  - foundation
-  - research_contracts
-  - desktop_shell
+  - source_adapters
+  - import_wizard
+  - quality_audit
+  - temporal_contract
+  - snapshots
+  - dataset_registry
   - persistence
-  - governance
+  - data_ground_ui
   - acceptance_evidence
 acceptance_gates:
-  - id: rust_workspace
-    requirement: Rust workspace builds and its tests pass on the exact candidate.
-    evidence: RUN_ACCEPTANCE.ps1 logs and the matching source-SHA-bound GitHub Actions acceptance artifact.
-  - id: frontend
-    requirement: Frontend lint, typecheck, tests, and production build pass.
-    evidence: RUN_ACCEPTANCE.ps1 logs and the matching source-SHA-bound GitHub Actions acceptance artifact.
-  - id: tauri_build
-    requirement: Tauri desktop binary builds, or records an evidenced environment block.
-    evidence: Tauri build log or an explicit environment-blocked result tied to the exact source SHA.
-  - id: persistence
-    requirement: SQLite schema versioning, migrations, rollback, and failure handling pass.
-    evidence: Rust persistence unit-test results, including migration rollback, database triggers, and tamper detection.
-  - id: contracts
-    requirement: Versioned research contracts and serialization validation pass.
-    evidence: Rust contract serialization and validation unit-test results on the exact source SHA.
-  - id: roadmap_governance
-    requirement: Roadmap, phase manifest, implementation state, and generated documentation agree.
-    evidence: Governance validator output plus its negative tests and generated ROADMAP.md comparison.
-  - id: baseline_read_only
-    requirement: The prior MAX_JEV_BENCHMARK research baseline remains read-only and untouched.
-    evidence: Acceptance report records that its runner did not open the legacy path; Owner confirmation covers host state outside GitHub CI.
-  - id: exact_source_evidence
-    requirement: Acceptance evidence names the exact clean source commit and tree.
-    evidence: GitHub Actions acceptance.json records the event SHA, Git tree SHA, workflow run, and clean checkout; SHA256SUMS.txt checks the report.
+  - id: csv_ingestion
+    requirement: Streamed CSV imports validate mapped OHLCV fields, explicit UTC timestamp semantics, provenance, and all selected markets.
+    evidence: Real labeled CSV fixtures exercise valid import, invalid rows, mappings, multi-market metadata, and format-independent content fingerprints.
+  - id: parquet_ingestion
+    requirement: Parquet imports validate the selected schema and yield the same canonical bars as equivalent CSV source data.
+    evidence: Real Parquet fixtures are parsed and compared row-for-row with CSV fixtures; malformed and unsupported schema cases are rejected.
+  - id: multi_market_timeframe
+    requirement: A dataset may contain arbitrary target and reference symbols across supported timeframes without a hardcoded market universe.
+    evidence: Catalog and ingestion tests assert arbitrary symbols, multiple market roles, multiple timeframes, counts, and UTC time ranges.
+  - id: quality_audit
+    requirement: Invalid OHLCV, duplicate or descending bars, and unclassified missing intervals block import without synthetic filling.
+    evidence: Boundary and property tests cover corruption, duplicate and out-of-order timestamps, non-finite or negative values, calendar closures, and actual missing bars.
+  - id: temporal_contract
+    requirement: Each canonical bar records UTC open, close, and decision availability; timestamp interpretation is explicit and lookahead-safe.
+    evidence: Tests cover timestamp offsets, close-time semantics, ambiguous inputs, and the rule that availability is no earlier than bar close.
+  - id: snapshot_integrity
+    requirement: Frozen datasets have immutable IDs, canonical sorted manifests, SHA-256 hashes, and preserved source bytes.
+    evidence: Reopen, tamper-detection, canonicalization, raw-copy checksum, and identical re-import tests bind registry metadata to verified content.
+  - id: dataset_registry
+    requirement: SQLite catalogs READY, BLOCKED, or QUARANTINED datasets and all imported market and quality metadata.
+    evidence: Registry tests enumerate datasets and inspect per-series counts, time ranges, audit findings, hashes, provenance, and status.
+  - id: atomicity_and_cancel
+    requirement: Staging and promotion are atomic, cancellation leaves no registered partial dataset, and retries are bounded and idempotent.
+    evidence: Failure injection, cancellation, duplicate import, rollback, and process-reopen tests verify staging cleanup and registry consistency.
+  - id: path_safety
+    requirement: Imports accept only selected local regular files and reject symlink escape, path traversal, oversized resources, and partial snapshots.
+    evidence: Filesystem boundary tests cover symlinks, invalid tokens, limits, cleanup, and non-registered failure records.
+  - id: data_ground_ipc_ui
+    requirement: Tauri IPC and Data Ground UI implement file selection, mapping, preview, explicit confirmation, catalog, and inspect flows with real source-backed data.
+    evidence: Command boundary and frontend interaction tests use labeled source fixtures; manual Owner UI acceptance remains a separate pending state.
+  - id: persistence_migrations
+    requirement: SQLite migrations upgrade transactionally and dataset rows are immutable and reverified on read.
+    evidence: Forward-upgrade, DDL and ledger rollback, trigger enforcement, manifest checksum, and snapshot tamper tests pass from fresh and prior schemas.
+  - id: reproducible_acceptance
+    requirement: The PowerShell runner and GitHub CI report each gate against an exact clean source SHA and tree without reading the legacy research path.
+    evidence: Acceptance report, per-gate logs, checksum manifest, workflow run, and artifact identity all name the same candidate SHA; legacy host state is NOT_VERIFIED.
   - id: owner_ui_acceptance
-    requirement: Owner reviews the desktop UI; automated tests do not substitute for this gate.
-    evidence: Owner's interactive UI review is recorded separately; automated acceptance leaves this gate pending.
+    requirement: Owner reviews the RG-R01 desktop import and catalog behavior; automation does not substitute for interactive acceptance.
+    evidence: Acceptance remains OWNER_UI_ACCEPTANCE_PENDING until Owner records review; component tests are not represented as manual UI evidence.

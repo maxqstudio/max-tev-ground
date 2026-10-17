@@ -1,4 +1,4 @@
-name: RG-R00 Foundation CI
+name: MAX Research Ground CI
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: rg-r00-${{ github.workflow }}-${{ github.ref }}
+  group: research-ground-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -108,6 +108,19 @@ jobs:
         shell: pwsh
         run: cargo run --locked -p rg-governance --bin rg-governance -- --check
 
+      - name: Verify reproducible phase evidence envelope
+        id: reproducible_acceptance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          if ($head -ne $env:GITHUB_SHA) { throw 'Acceptance evidence is not bound to the event SHA' }
+          if ($tree -notmatch '^[0-9a-f]{40,64}$') { throw 'Git tree SHA is invalid' }
+          $dirty = @(git status --porcelain --untracked-files=normal)
+          if ($dirty.Count -ne 0) { throw 'Acceptance requires an exact clean checkout' }
+          cargo run --locked -p rg-governance --bin rg-governance -- --check
+
       - name: Rust workspace tests
         id: rust_tests
         shell: pwsh
@@ -153,7 +166,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'rg-r00-tauri-target'
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'research-ground-tauri-target'
           npm run tauri -- build --no-bundle
 
       - name: Write source-bound acceptance evidence
@@ -164,6 +177,8 @@ jobs:
           RG_STEP_evidence_contract_tests: ${{ steps.evidence_contract_tests.outcome }}
           RG_STEP_rust_fmt: ${{ steps.rust_fmt.outcome }}
           RG_STEP_roadmap_governance: ${{ steps.roadmap_governance.outcome }}
+          RG_STEP_reproducible_acceptance: ${{ steps.reproducible_acceptance.outcome }}
+          RG_STEP_reproducible_acceptance: ${{ steps.reproducible_acceptance.outcome }}
           RG_STEP_rust_tests: ${{ steps.rust_tests.outcome }}
           RG_STEP_rust_clippy: ${{ steps.rust_clippy.outcome }}
           RG_STEP_rust_build: ${{ steps.rust_build.outcome }}
@@ -174,15 +189,17 @@ jobs:
           RG_STEP_frontend_build: ${{ steps.frontend_build.outcome }}
           RG_STEP_msvc_import: ${{ steps.msvc_import.outcome }}
           RG_STEP_tauri_build: ${{ steps.tauri_build.outcome }}
-        run: ./scripts/New-CiEvidence.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'rg-r00-evidence')
+          RG_GATE_reproducible_acceptance: ${{ steps.reproducible_acceptance.outcome }}
+          RG_GATE_reproducible_acceptance: ${{ steps.reproducible_acceptance.outcome }}
+        run: ./scripts/New-CiEvidence.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'rg-r01-evidence')
 
       - name: Upload acceptance evidence
         id: upload_evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: rg-r00-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/rg-r00-evidence/
+          name: rg-r01-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rg-r01-evidence/
           if-no-files-found: error
           retention-days: 90
 
@@ -202,14 +219,14 @@ jobs:
       - name: Download acceptance evidence
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: rg-r00-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/rg-r00-evidence
+          name: rg-r01-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rg-r01-evidence
 
       - name: Verify acceptance evidence checksum
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $evidenceDirectory = Join-Path $env:RUNNER_TEMP 'rg-r00-evidence'
+          $evidenceDirectory = Join-Path $env:RUNNER_TEMP 'rg-r01-evidence'
           $reportPath = Join-Path $evidenceDirectory 'acceptance.json'
           $checksumPath = Join-Path $evidenceDirectory 'SHA256SUMS.txt'
           if (-not (Test-Path -LiteralPath $reportPath) -or -not (Test-Path -LiteralPath $checksumPath)) { throw 'Acceptance evidence files are incomplete' }
@@ -221,4 +238,4 @@ jobs:
       - name: Attest source-bound acceptance report
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/rg-r00-evidence/acceptance.json
+          subject-path: ${{ runner.temp }}/rg-r01-evidence/acceptance.json

@@ -8,7 +8,16 @@ export type DeliveryStatus =
 
 export interface PageSnapshot {
   id: string;
-  status: "IMPLEMENTED" | "PLANNED";
+  status: "IMPLEMENTED" | "IN_PROGRESS" | "PLANNED" | "OWNER_ACCEPTED";
+}
+
+export interface PhaseAcceptanceRecord {
+  phase: string;
+  owner_acceptance: "PENDING" | "OWNER_ACCEPTED";
+  owner_ui_status: "PENDING" | "OWNER_ACCEPTED" | "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED";
+  source_sha: string;
+  ci_run_url: string;
+  owner_issue_url: string;
 }
 
 export interface FoundationSnapshot {
@@ -25,5 +34,6 @@ export interface FoundationSnapshot {
   owner_acceptance: "PENDING" | "OWNER_ACCEPTED";
   next_phase_unlocked: boolean;
   deliverables: Record<string, DeliveryStatus>;
+  accepted_phases: PhaseAcceptanceRecord[];
   pages: PageSnapshot[];
 }

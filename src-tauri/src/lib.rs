@@ -50,19 +50,24 @@ mod tests {
         .deserialize::<serde_json::Value>()
         .expect("command response should be JSON");
 
-        assert_eq!(response["current_phase"], "RG-R00");
+        assert_eq!(response["current_phase"], "RG-R01");
         assert_eq!(response["phase_lifecycle"], "ACTIVE");
         assert_eq!(response["pages"].as_array().unwrap().len(), 8);
+        assert_eq!(
+            response["accepted_phases"][0]["owner_ui_status"],
+            "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED"
+        );
+        assert_eq!(response["pages"][1]["status"], "IN_PROGRESS");
         assert!(!response["next_phase_unlocked"].as_bool().unwrap());
     }
 
     #[test]
     fn direct_command_boundary_never_claims_owner_acceptance() {
         let response = commands::get_foundation_status().unwrap();
-        assert_eq!(response.current_phase, "RG-R00");
+        assert_eq!(response.current_phase, "RG-R01");
         assert_eq!(
             response.owner_acceptance,
-            rg_governance::OwnerUiStatus::Pending
+            rg_governance::OwnerAcceptanceStatus::Pending
         );
         assert!(!response.next_phase_unlocked);
     }

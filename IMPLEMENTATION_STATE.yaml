@@ -1,14 +1,24 @@
-schema_version: 2
-current_phase: RG-R00
-builder_status: IMPLEMENTED
-automated_status: AUTOMATED_PASS
+schema_version: 3
+current_phase: RG-R01
+builder_status: IN_PROGRESS
+automated_status: NOT_RUN
 owner_ui_status: PENDING
 owner_acceptance: PENDING
 next_phase_unlocked: false
 deliverables:
-  foundation: VERIFIED
-  research_contracts: TESTED
-  desktop_shell: TESTED
-  persistence: TESTED
-  governance: VERIFIED
-  acceptance_evidence: TESTED
+  source_adapters: PLANNED
+  import_wizard: PLANNED
+  quality_audit: PLANNED
+  temporal_contract: PLANNED
+  snapshots: PLANNED
+  dataset_registry: PLANNED
+  persistence: PLANNED
+  data_ground_ui: PLANNED
+  acceptance_evidence: PLANNED
+accepted_phases:
+  - phase: RG-R00
+    owner_acceptance: OWNER_ACCEPTED
+    owner_ui_status: OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED
+    source_sha: a1f7ada003d57a26dcd4dfa41e86ba62a5890bed
+    ci_run_url: https://github.com/maxqstudio/max-tev-ground/actions/runs/39037310698
+    owner_issue_url: https://github.com/maxqstudio/max-tev-ground/issues/1

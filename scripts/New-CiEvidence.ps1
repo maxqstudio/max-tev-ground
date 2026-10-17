@@ -50,7 +50,7 @@ $sourceIsClean = $dirtyEntries.Count -eq 0
 $exactSourceStatus = if ($sourceMatchesEvent -and $sourceIsClean) { "PASS" } else { "FAIL" }
 
 $stepNames = @(
-    "source_check", "evidence_contract_tests", "rust_fmt", "roadmap_governance", "rust_tests", "rust_clippy", "rust_build",
+    "source_check", "evidence_contract_tests", "rust_fmt", "roadmap_governance", "reproducible_acceptance", "rust_tests", "rust_clippy", "rust_build",
     "npm_ci", "frontend_lint", "frontend_typecheck", "frontend_tests", "frontend_build", "msvc_import", "tauri_build"
 )
 $steps = [ordered]@{}
@@ -66,65 +66,59 @@ $tauriStatus = Get-GateStatus @($steps["tauri_build"])
 if ($steps["msvc_import"] -in @("FAILURE", "CANCELLED") -and $steps["tauri_build"] -in @("NOT_RUN", "SKIPPED")) {
     $tauriStatus = "ENVIRONMENT_BLOCKED"
 }
-$testStatus = Get-GateStatus @($steps["rust_tests"])
-
+$implementationPath = Join-Path $workspace "IMPLEMENTATION_STATE.yaml"
+$phaseManifestPath = Join-Path $workspace "PHASE_MANIFEST.yaml"
+$implementationSource = Get-Content -LiteralPath $implementationPath -Raw
+$phaseSource = Get-Content -LiteralPath $phaseManifestPath -Raw
+$phaseMatch = [regex]::Match($implementationSource, '(?m)^current_phase:\s*(RG-R\d{2})\s*$')
+$uiMatch = [regex]::Match($implementationSource, '(?m)^owner_ui_status:\s*([A-Z_]+)\s*$')
+$gateSection = [regex]::Match($phaseSource, '(?ms)^acceptance_gates:\s*(.*?)(?=^\S|\z)')
+if (-not $phaseMatch.Success -or -not $uiMatch.Success -or -not $gateSection.Success) {
+    throw "Cannot resolve active phase, Owner UI status, or mandatory acceptance gates"
+}
+$phaseName = $phaseMatch.Groups[1].Value
+$ownerUiStatus = $uiMatch.Groups[1].Value
+$ownerUiReportStatus = switch ($ownerUiStatus) {
+    "OWNER_ACCEPTED" { "OWNER_ACCEPTED" }
+    "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED" { "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED" }
+    default { "OWNER_UI_ACCEPTANCE_PENDING" }
+}
+$gateIds = @([regex]::Matches($gateSection.Groups[1].Value, '(?m)^\s+- id:\s*([a-z0-9_]+)\s*$') | ForEach-Object { $_.Groups[1].Value })
+if ($gateIds.Count -eq 0 -or @($gateIds | Select-Object -Unique).Count -ne $gateIds.Count) {
+    throw "The active phase acceptance gate IDs are empty or duplicated"
+}
+$steps["reproducible_acceptance"] = [Environment]::GetEnvironmentVariable("RG_STEP_reproducible_acceptance")
+if ([string]::IsNullOrWhiteSpace($steps["reproducible_acceptance"])) { $steps["reproducible_acceptance"] = "NOT_RUN" }
 $gates = @(
-    [pscustomobject]@{
-        id = "rust_workspace"
-        status = $rustStatus
-        evidence = @($rustSteps | ForEach-Object { New-StepEvidence $_ $steps[$_] })
-    },
-    [pscustomobject]@{
-        id = "frontend"
-        status = $frontendStatus
-        evidence = @($frontendSteps | ForEach-Object { New-StepEvidence $_ $steps[$_] })
-    },
-    [pscustomobject]@{
-        id = "tauri_build"
-        status = $tauriStatus
-        evidence = @(
-            (New-StepEvidence "msvc_import" $steps["msvc_import"]),
-            (New-StepEvidence "tauri_build" $steps["tauri_build"])
-        )
-    },
-    [pscustomobject]@{
-        id = "persistence"
-        status = $testStatus
-        evidence = @(New-StepEvidence "rust_tests" $steps["rust_tests"])
-    },
-    [pscustomobject]@{
-        id = "contracts"
-        status = $testStatus
-        evidence = @(New-StepEvidence "rust_tests" $steps["rust_tests"])
-    },
-    [pscustomobject]@{
-        id = "roadmap_governance"
-        status = $roadmapStatus
-        evidence = @(New-StepEvidence "roadmap_governance" $steps["roadmap_governance"])
-    },
-    [pscustomobject]@{
-        id = "baseline_read_only"
-        status = "NOT_VERIFIED"
-        evidence = "The GitHub runner has no access to the Owner host's legacy baseline; this report makes no claim about that host state."
-    },
-    [pscustomobject]@{
-        id = "exact_source_evidence"
-        status = $exactSourceStatus
-        evidence = [pscustomobject]@{
-            event_sha = $expectedSha
-            checked_out_sha = $candidateSha
-            tree_sha = $treeSha
-            clean_checkout = $sourceIsClean
+    foreach ($id in $gateIds) {
+        if ($id -eq "owner_ui_acceptance") {
+            $gateStatus = switch ($ownerUiReportStatus) {
+                "OWNER_ACCEPTED" { "PASS" }
+                "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED" { "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED" }
+                default { "OWNER_UI_ACCEPTANCE_PENDING" }
+            }
+            $gateEvidence = "implementation_state.owner_ui_status=$ownerUiStatus"
+        } else {
+            $outcome = [Environment]::GetEnvironmentVariable("RG_GATE_$id")
+            if ([string]::IsNullOrWhiteSpace($outcome)) { $outcome = "NOT_RUN" }
+            $outcome = $outcome.Trim().ToUpperInvariant()
+            $gateStatus = switch ($outcome) {
+                "SUCCESS" { "PASS" }
+                "PASS" { "PASS" }
+                "FAILURE" { "FAIL" }
+                "CANCELLED" { "FAIL" }
+                "FAIL" { "FAIL" }
+                "ENVIRONMENT_BLOCKED" { "ENVIRONMENT_BLOCKED" }
+                default { "NOT_RUN" }
+            }
+            $gateEvidence = "RG_GATE_$id=$outcome; source_sha=$candidateSha; tree_sha=$treeSha"
         }
-    },
-    [pscustomobject]@{
-        id = "owner_ui_acceptance"
-        status = "OWNER_UI_ACCEPTANCE_PENDING"
-        evidence = "GitHub Actions does not launch or interact with the Owner's desktop UI."
+        [pscustomobject]@{ id = $id; status = $gateStatus; evidence = $gateEvidence }
     }
 )
 
-$automatedGates = @($rustStatus, $frontendStatus, $roadmapStatus, $tauriStatus, $evidenceContractStatus)
+$automatedGateStatuses = @($gates | Where-Object id -ne "owner_ui_acceptance" | ForEach-Object status)
+$automatedGates = @($rustStatus, $frontendStatus, $roadmapStatus, $tauriStatus, $evidenceContractStatus) + $automatedGateStatuses
 if ($exactSourceStatus -eq "FAIL" -or $automatedGates -contains "FAIL") {
     $automatedStatus = "FAILED"
 } elseif ($automatedGates -contains "ENVIRONMENT_BLOCKED") {
@@ -147,7 +141,7 @@ function Get-ToolVersion([string]$Command, [string[]]$Arguments) {
 $runUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
 $report = [ordered]@{
     schema_version = 1
-    phase = "RG-R00"
+    phase = $phaseName
     generated_utc = [DateTime]::UtcNow.ToString("o")
     automated_status = $automatedStatus
     next_phase_unlocked = $false
@@ -175,7 +169,7 @@ $report = [ordered]@{
         node = Get-ToolVersion "node" @("--version")
         npm = Get-ToolVersion "npm" @("--version")
     }
-    owner_ui_status = "OWNER_UI_ACCEPTANCE_PENDING"
+    owner_ui_status = $ownerUiReportStatus
     legacy_baseline_status = "NOT_VERIFIED_BY_GITHUB_CI"
     gates = $gates
 }
