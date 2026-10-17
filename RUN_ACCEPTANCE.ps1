@@ -23,23 +23,37 @@ function Add-Result([string]$Name, [string]$Status, [string]$Evidence) {
     })
 }
 
-function Invoke-LoggedGate([string]$Name, [scriptblock]$Action) {
+function Invoke-LoggedGate([string]$Name, [scriptblock]$Action, [int]$ExpectedExitCode = 0) {
     $safeName = $Name.ToLowerInvariant() -replace '[^a-z0-9]+', '-'
     $logPath = Join-Path $EvidenceDir "$safeName.log"
     Write-Host ""
     Write-Host "=== $Name ==="
     $exitCode = 0
+    $previousErrorActionPreference = $ErrorActionPreference
+    $previousErrorCount = $global:Error.Count
     try {
+        # Native tools may write successful progress or diagnostics to stderr. Capture those
+        # records in the gate log and decide success from the process exit code instead.
+        $ErrorActionPreference = "Continue"
+        $global:LASTEXITCODE = $null
         & $Action *> $logPath
         if ($null -ne $LASTEXITCODE) {
             $exitCode = [int]$LASTEXITCODE
+        }
+        $newErrorCount = [Math]::Max(0, $global:Error.Count - $previousErrorCount)
+        $actionErrors = @($global:Error | Select-Object -First $newErrorCount)
+        if (@($actionErrors | Where-Object { $_.FullyQualifiedErrorId -notlike "NativeCommandError*" }).Count -gt 0) {
+            $exitCode = 1
         }
     }
     catch {
         $_ | Out-String | Set-Content -LiteralPath $logPath -Encoding utf8
         $exitCode = 1
     }
-    $status = if ($exitCode -eq 0) { "PASS" } else { "FAIL" }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $status = if ($exitCode -eq $ExpectedExitCode) { "PASS" } else { "FAIL" }
     Add-Result $Name $status $logPath
     $stepName = switch ($Name) {
         "Rust formatting" { "rust_fmt" }
@@ -62,7 +76,7 @@ function Invoke-LoggedGate([string]$Name, [scriptblock]$Action) {
         [Environment]::SetEnvironmentVariable("RG_STEP_$stepName", $outcome)
     }
     Get-Content -LiteralPath $logPath -Tail 18 | ForEach-Object { Write-Host $_ }
-    Write-Host "RESULT=$status EXIT=$exitCode LOG=$logPath"
+    Write-Host "RESULT=$status EXIT=$exitCode EXPECTED=$ExpectedExitCode LOG=$logPath"
 }
 
 $commit = (git rev-parse HEAD).Trim()
@@ -107,6 +121,18 @@ if ($nodeVersion -ne "v24.19.0" -or $npmVersion -ne "11.17.0" -or $rustVersion -
     Add-Result "pinned_toolchains" "ENVIRONMENT_BLOCKED" "node=$nodeVersion npm=$npmVersion rust=$rustVersion; required node=v24.19.0 npm=11.17.0 rustc=1.99.1"
 } else {
     Add-Result "pinned_toolchains" "PASS" "node=$nodeVersion npm=$npmVersion rust=$rustVersion"
+}
+$nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+if ($null -ne $nodeCommand) {
+    Invoke-LoggedGate "Acceptance stderr handling self-test" {
+        & $nodeCommand.Source -e "console.error('fixture: successful command wrote to stderr'); process.exit(0)"
+    }
+    Invoke-LoggedGate "Acceptance nonzero exit self-test" {
+        & $nodeCommand.Source -e "console.error('fixture: expected command failure'); process.exit(17)"
+    } 17
+} else {
+    Add-Result "Acceptance stderr handling self-test" "ENVIRONMENT_BLOCKED" "Node.js is required to verify the native process stderr and exit-code handling"
+    Add-Result "Acceptance nonzero exit self-test" "ENVIRONMENT_BLOCKED" "Node.js is required to verify the native process stderr and exit-code handling"
 }
 
 $programFilesX86 = [System.Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
@@ -212,10 +238,16 @@ $gateIds = @([regex]::Matches($gateSection.Groups[1].Value, '(?m)^\s+- id:\s*([a
 foreach ($gateId in $gateIds) { [Environment]::SetEnvironmentVariable("RG_GATE_$gateId", $null) }
 $env:RG_STEP_reproducible_acceptance = if ($script:StepOutcomes["roadmap_governance"] -eq "success" -and $script:StepOutcomes["source_check"] -eq "success") { "success" } else { "failure" }
 $script:StepOutcomes["reproducible_acceptance"] = $env:RG_STEP_reproducible_acceptance
+$global:LASTEXITCODE = $null
 & (Join-Path $Root "scripts\New-CiEvidence.ps1") -OutputDirectory $EvidenceDir
-if ($LASTEXITCODE -ne 0) { throw "Could not generate source-bound acceptance evidence" }
 $reportPath = Join-Path $EvidenceDir "acceptance.json"
+if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+    throw "Could not generate source-bound acceptance evidence"
+}
 $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+if ($report.source.commit_sha -ne $commit -or $report.source.tree_sha -ne $tree) {
+    throw "Generated acceptance evidence does not match the tested source commit and tree"
+}
 $report | Add-Member -NotePropertyName local_execution -NotePropertyValue ([ordered]@{
     started_utc = $StartedUtc.ToString("o")
     completed_utc = [DateTime]::UtcNow.ToString("o")
