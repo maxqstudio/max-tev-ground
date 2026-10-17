@@ -17,5 +17,5 @@ Roadmap drift and interactive desktop automation can otherwise create false comp
 
 - RG-R00 remains active until Owner acceptance.
 - RG-R01 stays locked even after local automated tests pass.
-- If no official remote is configured, CI remains NOT_CONFIGURED; no remote is invented.
+- If an official remote is configured, CI starts PENDING and is recorded PASS only after the workflow succeeds for the exact commit. If no official remote is configured, CI remains NOT_CONFIGURED; no remote is invented.
 - Automated tests, desktop compilation, Owner UI acceptance, and trading-edge evidence remain distinct.

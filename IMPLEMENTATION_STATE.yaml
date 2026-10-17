@@ -4,7 +4,7 @@ builder_status: IMPLEMENTED
 automated_status: AUTOMATED_PASS
 owner_ui_status: PENDING
 owner_acceptance: PENDING
-ci_status: NOT_CONFIGURED
+ci_status: PENDING
 next_phase_unlocked: false
 deliverables:
   foundation: VERIFIED

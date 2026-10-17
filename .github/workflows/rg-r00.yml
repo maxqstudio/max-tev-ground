@@ -1,0 +1,106 @@
+name: RG-R00 Foundation CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rg-r00-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-foundation:
+    name: Windows foundation checks
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24.19.0
+          cache: npm
+
+      - name: Set up pinned Rust toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain installation failed' }
+          rustc --version
+          if ($LASTEXITCODE -ne 0) { throw 'rustc is unavailable' }
+          node --version
+          if ($LASTEXITCODE -ne 0) { throw 'Node.js is unavailable' }
+          npm install --global npm@11.17.0
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned npm installation failed' }
+          if ((npm --version).Trim() -ne '11.17.0') { throw 'npm version does not match package.json' }
+
+      - name: Import MSVC developer environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+          $vswhere = Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'Visual Studio vswhere.exe is unavailable' }
+          $vsPath = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if (-not $vsPath) { throw 'MSVC x64 C++ Build Tools are unavailable' }
+          $vsDevCmd = Join-Path $vsPath 'Common7\Tools\VsDevCmd.bat'
+          if (-not (Test-Path -LiteralPath $vsDevCmd)) { throw 'VsDevCmd.bat is unavailable' }
+          $quote = [char]34
+          $commandLine = "call $quote$vsDevCmd$quote -no_logo -arch=x64 -host_arch=x64 >nul && set"
+          $environmentLines = & $env:ComSpec /d /s /c $commandLine
+          if ($LASTEXITCODE -ne 0) { throw 'VsDevCmd.bat failed to initialize MSVC' }
+          $exports = [System.Collections.Generic.List[string]]::new()
+          foreach ($line in $environmentLines) {
+            $separator = $line.IndexOf('=')
+            if ($separator -gt 0) {
+              $name = $line.Substring(0, $separator)
+              $value = $line.Substring($separator + 1)
+              if ($value.Contains("`n") -or $value.Contains("`r")) { throw "Environment variable $name contains a newline" }
+              Set-Item -Path "Env:$name" -Value $value
+              $exports.Add("$name=$value")
+            }
+          }
+          [System.IO.File]::AppendAllLines($env:GITHUB_ENV, $exports, [System.Text.UTF8Encoding]::new($false))
+          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw 'MSVC compiler was not added to PATH' }
+
+      - name: Verify exact event source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = (git rev-parse HEAD).Trim()
+          Write-Host "SOURCE_SHA=$head"
+          if ($head -ne $env:GITHUB_SHA) { throw "Checked out $head but event requested $env:GITHUB_SHA" }
+
+      - name: Validate roadmap, contracts, Rust, frontend, and Tauri
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-Checked([string]$Name, [scriptblock]$Command) {
+            & $Command
+            $exitCode = $LASTEXITCODE
+            if ($null -ne $exitCode -and $exitCode -ne 0) { throw "$Name failed with exit code $exitCode" }
+          }
+          Invoke-Checked 'Rust formatting' { cargo fmt --all -- --check }
+          Invoke-Checked 'Roadmap governance' { cargo run --locked -p rg-governance --bin rg-governance -- --check }
+          Invoke-Checked 'Rust workspace tests' { cargo test --workspace --locked }
+          Invoke-Checked 'Rust lint' { cargo clippy --workspace --all-targets --locked -- -D warnings }
+          Invoke-Checked 'Rust workspace build' { cargo build --workspace --locked }
+          Invoke-Checked 'Frontend clean install' { npm ci --no-audit --no-fund }
+          Invoke-Checked 'Frontend lint' { npm run lint }
+          Invoke-Checked 'Frontend typecheck' { npm run typecheck }
+          Invoke-Checked 'Frontend unit tests' { npm test -- --run }
+          Invoke-Checked 'Frontend production build' { npm run build }
+          Invoke-Checked 'Tauri Windows desktop build' { npm run tauri -- build --no-bundle }
