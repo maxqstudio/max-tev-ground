@@ -1,20 +1,20 @@
 schema_version: 3
 current_phase: RG-R01
-builder_status: IN_PROGRESS
+builder_status: IMPLEMENTED
 automated_status: NOT_RUN
 owner_ui_status: PENDING
 owner_acceptance: PENDING
 next_phase_unlocked: false
 deliverables:
-  source_adapters: PLANNED
-  import_wizard: PLANNED
-  quality_audit: PLANNED
-  temporal_contract: PLANNED
-  snapshots: PLANNED
-  dataset_registry: PLANNED
-  persistence: PLANNED
-  data_ground_ui: PLANNED
-  acceptance_evidence: PLANNED
+  source_adapters: TESTED
+  import_wizard: TESTED
+  quality_audit: TESTED
+  temporal_contract: TESTED
+  snapshots: TESTED
+  dataset_registry: TESTED
+  persistence: TESTED
+  data_ground_ui: TESTED
+  acceptance_evidence: IMPLEMENTED
 accepted_phases:
   - phase: RG-R00
     owner_acceptance: OWNER_ACCEPTED

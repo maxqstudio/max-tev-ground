@@ -1,3 +1,7 @@
+mod data_ground_commands;
+
+use tauri::Manager;
+
 mod commands {
     use rg_governance::GovernanceSnapshot;
 
@@ -8,11 +12,27 @@ mod commands {
 }
 
 fn register_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
-    builder.invoke_handler(tauri::generate_handler![commands::get_foundation_status])
+    builder.invoke_handler(tauri::generate_handler![
+        commands::get_foundation_status,
+        data_ground_commands::select_data_source,
+        data_ground_commands::inspect_selected_source,
+        data_ground_commands::preview_data_import,
+        data_ground_commands::confirm_data_import,
+        data_ground_commands::cancel_data_import,
+        data_ground_commands::list_datasets,
+        data_ground_commands::inspect_dataset,
+        data_ground_commands::list_import_attempts
+    ])
 }
 
 pub fn run() {
     register_commands(tauri::Builder::default())
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let data_directory = app.path().app_data_dir()?;
+            app.manage(data_ground_commands::DataGroundState::open(data_directory)?);
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("failed to run MAX Research Ground desktop shell");
 }

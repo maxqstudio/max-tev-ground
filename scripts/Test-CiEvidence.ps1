@@ -41,10 +41,7 @@ try {
         "npm_ci", "frontend_lint", "frontend_typecheck", "frontend_tests", "frontend_build", "msvc_import", "tauri_build"
     )
     foreach ($name in $stepNames) { [Environment]::SetEnvironmentVariable("RG_STEP_$name", "success") }
-    foreach ($id in $gateIds) {
-        if ($id -ne "owner_ui_acceptance") { [Environment]::SetEnvironmentVariable("RG_GATE_$id", "success") }
-    }
-
+    foreach ($id in $gateIds) { [Environment]::SetEnvironmentVariable("RG_GATE_$id", $null) }
     $passingDirectory = Join-Path $fixtureRoot "passing"
     & $generator -OutputDirectory $passingDirectory
     $passingPath = Join-Path $passingDirectory "acceptance.json"
@@ -59,6 +56,8 @@ try {
     if ($passing.legacy_baseline_status -ne "NOT_VERIFIED_BY_GITHUB_CI") { throw "Legacy baseline status was overstated" }
     if ($passing.owner_ui_status -ne "OWNER_UI_ACCEPTANCE_PENDING") { throw "Owner UI review was not left pending" }
     if (($passing.gates | Where-Object id -eq "owner_ui_acceptance").status -ne "OWNER_UI_ACCEPTANCE_PENDING") { throw "Owner UI gate was not left pending" }
+    $unpassedAutomatedGates = @($passing.gates | Where-Object { $_.id -ne "owner_ui_acceptance" -and $_.status -ne "PASS" })
+    if ($unpassedAutomatedGates.Count -ne 0) { throw "A mapped acceptance gate did not inherit its passing validation evidence" }
     $checksumLine = (Get-Content -LiteralPath (Join-Path $passingDirectory "SHA256SUMS.txt") -Raw).Trim()
     $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $passingPath).Hash.ToLowerInvariant()
     if ($checksumLine -ne "$actualHash  acceptance.json") { throw "Acceptance evidence checksum is invalid" }

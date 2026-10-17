@@ -736,7 +736,7 @@ mod tests {
             .and_then(|mapping| mapping.get(&jobs_key))
             .and_then(serde_yaml_ng::Value::as_mapping)
             .expect("workflow declares a jobs mapping");
-        assert!(jobs.contains_key(&serde_yaml_ng::Value::String("windows-foundation".into())));
+        assert!(jobs.contains_key(serde_yaml_ng::Value::String("windows-foundation".into())));
 
         let step_ids: Vec<_> = source
             .lines()

@@ -1,12 +1,14 @@
 [workspace]
 members = [
   "crates/rg-contracts",
+  "crates/rg-data-ground",
   "crates/rg-governance",
   "crates/rg-persistence",
   "src-tauri",
 ]
 default-members = [
   "crates/rg-contracts",
+  "crates/rg-data-ground",
   "crates/rg-governance",
   "crates/rg-persistence",
   "src-tauri",
@@ -28,5 +30,10 @@ thiserror = "=2.0.21"
 uuid = { version = "=1.28.0", features = ["serde", "v7"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 tempfile = "=3.27.0"
+arrow = "=60.0.0"
+chrono = { version = "=0.4.45", features = ["serde"] }
+csv = "=1.4.0"
+parquet = { version = "=60.0.0", features = ["arrow"] }
 tauri = { version = "=2.12.4", default-features = false, features = ["wry", "compression", "dynamic-acl", "x11", "dbus", "test"] }
 tauri-build = "=2.7.3"
+tauri-plugin-dialog = "=2.8.3"

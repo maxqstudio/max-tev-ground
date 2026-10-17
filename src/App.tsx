@@ -10,6 +10,7 @@ import {
   ListFilter,
   SlidersHorizontal,
 } from "lucide-react";
+import DataGround from "./DataGround";
 import type { FoundationSnapshot } from "./types";
 
 const navigation = [
@@ -133,17 +134,7 @@ export default function App() {
         {activePage === "overview" ? (
           <Overview snapshot={snapshot} error={error} />
         ) : activePage === "data-ground" ? (
-          <PlannedPage
-            label={currentPage.label}
-            phase={currentPage.phase}
-            icon={currentPage.icon}
-            status={(() => {
-              const status = snapshot?.pages.find((page) => page.id === "data-ground")?.status;
-              return status === "PLANNED" || status === "IN_PROGRESS" || status === "OWNER_ACCEPTED"
-                ? status
-                : "IN_PROGRESS";
-            })()}
-          />
+          <DataGround />
         ) : (
           <PlannedPage
             label={currentPage.label}

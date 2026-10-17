@@ -14,6 +14,7 @@ function Get-StepOutcome([string]$Name) {
 
 function Get-GateStatus([string[]]$Outcomes) {
     if ($Outcomes -contains "FAILURE" -or $Outcomes -contains "CANCELLED") { return "FAIL" }
+    if ($Outcomes -contains "ENVIRONMENT_BLOCKED") { return "ENVIRONMENT_BLOCKED" }
     if ($Outcomes.Count -eq 0 -or $Outcomes -contains "NOT_RUN" -or $Outcomes -contains "SKIPPED") {
         return "NOT_RUN"
     }
@@ -72,11 +73,14 @@ $implementationSource = Get-Content -LiteralPath $implementationPath -Raw
 $phaseSource = Get-Content -LiteralPath $phaseManifestPath -Raw
 $phaseMatch = [regex]::Match($implementationSource, '(?m)^current_phase:\s*(RG-R\d{2})\s*$')
 $uiMatch = [regex]::Match($implementationSource, '(?m)^owner_ui_status:\s*([A-Z_]+)\s*$')
+$ownerAcceptanceMatch = [regex]::Match($implementationSource, '(?m)^owner_acceptance:\s*([A-Z_]+)\s*$')
+$manifestPhaseMatch = [regex]::Match($phaseSource, '(?m)^phase:\s*(RG-R\d{2})\s*$')
 $gateSection = [regex]::Match($phaseSource, '(?ms)^acceptance_gates:[ \t]*\r?\n(.*?)(?=^\S|\z)')
-if (-not $phaseMatch.Success -or -not $uiMatch.Success -or -not $gateSection.Success) {
-    throw "Cannot resolve active phase, Owner UI status, or mandatory acceptance gates"
+if (-not $phaseMatch.Success -or -not $uiMatch.Success -or -not $ownerAcceptanceMatch.Success -or -not $manifestPhaseMatch.Success -or -not $gateSection.Success) {
+    throw "Cannot resolve synchronized active phase, Owner status, or mandatory acceptance gates"
 }
 $phaseName = $phaseMatch.Groups[1].Value
+if ($manifestPhaseMatch.Groups[1].Value -ne $phaseName) { throw "Implementation state and phase manifest are out of sync" }
 $ownerUiStatus = $uiMatch.Groups[1].Value
 $ownerUiReportStatus = switch ($ownerUiStatus) {
     "OWNER_ACCEPTED" { "OWNER_ACCEPTED" }
@@ -86,6 +90,29 @@ $ownerUiReportStatus = switch ($ownerUiStatus) {
 $gateIds = @([regex]::Matches($gateSection.Groups[1].Value, '(?m)^\s+- id:\s*([a-z0-9_]+)\s*$') | ForEach-Object { $_.Groups[1].Value })
 if ($gateIds.Count -eq 0 -or @($gateIds | Select-Object -Unique).Count -ne $gateIds.Count) {
     throw "The active phase acceptance gate IDs are empty or duplicated"
+}
+$gateStepMap = @{
+    csv_ingestion = @("rust_tests")
+    parquet_ingestion = @("rust_tests")
+    multi_market_timeframe = @("rust_tests")
+    quality_audit = @("rust_tests")
+    temporal_contract = @("rust_tests")
+    snapshot_integrity = @("rust_tests", "rust_build")
+    dataset_registry = @("rust_tests")
+    atomicity_and_cancel = @("rust_tests")
+    path_safety = @("rust_tests")
+    data_ground_ipc_ui = @("rust_tests", "frontend_tests", "tauri_build")
+    persistence_migrations = @("rust_tests")
+    reproducible_acceptance = @("source_check", "evidence_contract_tests", "roadmap_governance", "reproducible_acceptance")
+    # RG-R00 gates remain supported for contract self-tests and historical evidence generation.
+    rust_workspace = @("rust_fmt", "rust_tests", "rust_clippy", "rust_build")
+    frontend = @("npm_ci", "frontend_lint", "frontend_typecheck", "frontend_tests", "frontend_build")
+    tauri_build = @("msvc_import", "tauri_build")
+    persistence = @("rust_tests")
+    contracts = @("rust_tests")
+    roadmap_governance = @("roadmap_governance")
+    baseline_read_only = @("source_check")
+    exact_source_evidence = @("source_check", "reproducible_acceptance")
 }
 $steps["reproducible_acceptance"] = [Environment]::GetEnvironmentVariable("RG_STEP_reproducible_acceptance")
 if ([string]::IsNullOrWhiteSpace($steps["reproducible_acceptance"])) { $steps["reproducible_acceptance"] = "NOT_RUN" }
@@ -100,18 +127,25 @@ $gates = @(
             $gateEvidence = "implementation_state.owner_ui_status=$ownerUiStatus"
         } else {
             $outcome = [Environment]::GetEnvironmentVariable("RG_GATE_$id")
-            if ([string]::IsNullOrWhiteSpace($outcome)) { $outcome = "NOT_RUN" }
-            $outcome = $outcome.Trim().ToUpperInvariant()
-            $gateStatus = switch ($outcome) {
-                "SUCCESS" { "PASS" }
-                "PASS" { "PASS" }
-                "FAILURE" { "FAIL" }
-                "CANCELLED" { "FAIL" }
-                "FAIL" { "FAIL" }
-                "ENVIRONMENT_BLOCKED" { "ENVIRONMENT_BLOCKED" }
-                default { "NOT_RUN" }
+            $mappedSteps = $gateStepMap[$id]
+            if ([string]::IsNullOrWhiteSpace($outcome) -and $null -ne $mappedSteps) {
+                $outcomes = @($mappedSteps | ForEach-Object { $steps[$_] })
+                $gateStatus = Get-GateStatus $outcomes
+                $outcome = ($mappedSteps | ForEach-Object { "$_=$($steps[$_])" }) -join ";"
+            } else {
+                if ([string]::IsNullOrWhiteSpace($outcome)) { $outcome = "NOT_RUN" }
+                $outcome = $outcome.Trim().ToUpperInvariant()
+                $gateStatus = switch ($outcome) {
+                    "SUCCESS" { "PASS" }
+                    "PASS" { "PASS" }
+                    "FAILURE" { "FAIL" }
+                    "CANCELLED" { "FAIL" }
+                    "FAIL" { "FAIL" }
+                    "ENVIRONMENT_BLOCKED" { "ENVIRONMENT_BLOCKED" }
+                    default { "NOT_RUN" }
+                }
             }
-            $gateEvidence = "RG_GATE_$id=$outcome; source_sha=$candidateSha; tree_sha=$treeSha"
+            $gateEvidence = "steps=$outcome; source_sha=$candidateSha; tree_sha=$treeSha"
         }
         [pscustomobject]@{ id = $id; status = $gateStatus; evidence = $gateEvidence }
     }
@@ -170,6 +204,7 @@ $report = [ordered]@{
         npm = Get-ToolVersion "npm" @("--version")
     }
     owner_ui_status = $ownerUiReportStatus
+    owner_acceptance = $ownerAcceptanceMatch.Groups[1].Value
     legacy_baseline_status = "NOT_VERIFIED_BY_GITHUB_CI"
     gates = $gates
 }

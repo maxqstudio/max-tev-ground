@@ -14,16 +14,16 @@ deliverables:
 acceptance_gates:
   - id: csv_ingestion
     requirement: Streamed CSV imports validate mapped OHLCV fields, explicit UTC timestamp semantics, provenance, and all selected markets.
-    evidence: Real labeled CSV fixtures exercise valid import, invalid rows, mappings, multi-market metadata, and format-independent content fingerprints.
+    evidence: Clearly labeled synthetic CSV fixtures exercise valid import, invalid rows, mappings, multi-market metadata, and format-independent content fingerprints; fixtures are not market evidence.
   - id: parquet_ingestion
     requirement: Parquet imports validate the selected schema and yield the same canonical bars as equivalent CSV source data.
-    evidence: Real Parquet fixtures are parsed and compared row-for-row with CSV fixtures; malformed and unsupported schema cases are rejected.
+    evidence: A Parquet fixture generated from labeled synthetic bars is parsed and compared row-for-row with equivalent CSV input; malformed and unsupported schema cases are rejected.
   - id: multi_market_timeframe
     requirement: A dataset may contain arbitrary target and reference symbols across supported timeframes without a hardcoded market universe.
     evidence: Catalog and ingestion tests assert arbitrary symbols, multiple market roles, multiple timeframes, counts, and UTC time ranges.
   - id: quality_audit
     requirement: Invalid OHLCV, duplicate or descending bars, and unclassified missing intervals block import without synthetic filling.
-    evidence: Boundary and property tests cover corruption, duplicate and out-of-order timestamps, non-finite or negative values, calendar closures, and actual missing bars.
+    evidence: Boundary and property tests cover corruption, duplicate and out-of-order timestamps, non-finite or negative values, weekend and custom closed intervals, continuous/unknown calendars, and actual missing bars.
   - id: temporal_contract
     requirement: Each canonical bar records UTC open, close, and decision availability; timestamp interpretation is explicit and lookahead-safe.
     evidence: Tests cover timestamp offsets, close-time semantics, ambiguous inputs, and the rule that availability is no earlier than bar close.

@@ -10,9 +10,10 @@ Set-Location -LiteralPath $Root
 
 $StartedUtc = [DateTime]::UtcNow
 $RunId = $StartedUtc.ToString("yyyyMMddTHHmmssZ")
-$EvidenceDir = Join-Path $Root "artifacts\acceptance\rg-r00-$RunId"
+$EvidenceDir = Join-Path $Root "artifacts\acceptance\rg-r01-$RunId"
 New-Item -ItemType Directory -Path $EvidenceDir -Force | Out-Null
 $script:GateResults = [System.Collections.Generic.List[object]]::new()
+$script:StepOutcomes = [ordered]@{}
 
 function Add-Result([string]$Name, [string]$Status, [string]$Evidence) {
     $script:GateResults.Add([pscustomobject]@{
@@ -40,6 +41,26 @@ function Invoke-LoggedGate([string]$Name, [scriptblock]$Action) {
     }
     $status = if ($exitCode -eq 0) { "PASS" } else { "FAIL" }
     Add-Result $Name $status $logPath
+    $stepName = switch ($Name) {
+        "Rust formatting" { "rust_fmt" }
+        "Roadmap governance" { "roadmap_governance" }
+        "CI evidence contract tests" { "evidence_contract_tests" }
+        "Rust workspace tests" { "rust_tests" }
+        "Rust lint" { "rust_clippy" }
+        "Rust workspace build" { "rust_build" }
+        "Frontend clean install" { "npm_ci" }
+        "Frontend lint" { "frontend_lint" }
+        "Frontend typecheck" { "frontend_typecheck" }
+        "Frontend unit tests" { "frontend_tests" }
+        "Frontend production build" { "frontend_build" }
+        "Tauri desktop build without packaging" { "tauri_build" }
+        default { $null }
+    }
+    if ($stepName) {
+        $outcome = if ($status -eq "PASS") { "success" } else { "failure" }
+        $script:StepOutcomes[$stepName] = $outcome
+        [Environment]::SetEnvironmentVariable("RG_STEP_$stepName", $outcome)
+    }
     Get-Content -LiteralPath $logPath -Tail 18 | ForEach-Object { Write-Host $_ }
     Write-Host "RESULT=$status EXIT=$exitCode LOG=$logPath"
 }
@@ -53,6 +74,13 @@ if ($LASTEXITCODE -ne 0 -or $tree -notmatch '^[0-9a-f]{40,64}$') {
     throw "Cannot resolve exact Git tree SHA"
 }
 $branch = (git rev-parse --abbrev-ref HEAD).Trim()
+$expectedBranch = "work/rg-r01-data-ground"
+if ($branch -ne $expectedBranch) {
+    Add-Result "authorized_branch" "FAIL" "expected=$expectedBranch actual=$branch"
+    throw "Acceptance must run on $expectedBranch; found $branch"
+}
+$script:StepOutcomes["source_check"] = "success"
+[Environment]::SetEnvironmentVariable("RG_STEP_source_check", "success")
 $dirty = @(git status --porcelain --untracked-files=normal)
 if ($LASTEXITCODE -ne 0) {
     throw "Cannot inspect Git status"
@@ -109,6 +137,8 @@ if ($vsPath) {
 }
 if ($msvcReady) {
     Add-Result "windows_msvc_prerequisite" "PASS" "Visual Studio Build Tools at $vsPath; VCToolsVersion=$env:VCToolsVersion; WindowsSDKVersion=$env:WindowsSDKVersion"
+    $script:StepOutcomes["msvc_import"] = "success"
+    [Environment]::SetEnvironmentVariable("RG_STEP_msvc_import", "success")
 } else {
     Add-Result "windows_msvc_prerequisite" "ENVIRONMENT_BLOCKED" "MSVC C++ Build Tools x64 developer environment was not available"
 }
@@ -160,25 +190,37 @@ if ($msvcReady) {
     }
 } else {
     Add-Result "Tauri desktop build without packaging" "ENVIRONMENT_BLOCKED" "Requires the MSVC x64 developer environment"
+    $script:StepOutcomes["msvc_import"] = "ENVIRONMENT_BLOCKED"
+    $script:StepOutcomes["tauri_build"] = "ENVIRONMENT_BLOCKED"
+    [Environment]::SetEnvironmentVariable("RG_STEP_msvc_import", "ENVIRONMENT_BLOCKED")
+    [Environment]::SetEnvironmentVariable("RG_STEP_tauri_build", "ENVIRONMENT_BLOCKED")
 }
 
-$baselinePath = "D:\MAX_JEV_BENCHMARK\JEV_TEV_EURUSD_H1_LAST2M"
-$report = [ordered]@{
-    schema_version = 1
-    phase = "RG-R00"
-    automated_status = "NOT_RUN"
-    owner_ui_status = "OWNER_UI_ACCEPTANCE_PENDING"
-    owner_acceptance = "PENDING"
-    next_phase_unlocked = $false
+$env:GITHUB_WORKSPACE = $Root
+$env:GITHUB_SHA = $commit
+$env:GITHUB_REPOSITORY = "maxqstudio/max-tev-ground"
+$env:GITHUB_REF = "refs/heads/$branch"
+$env:GITHUB_REF_NAME = $branch
+$env:GITHUB_RUN_ID = "local-$RunId"
+$env:GITHUB_RUN_ATTEMPT = "1"
+$env:GITHUB_EVENT_NAME = "local-acceptance"
+$env:GITHUB_WORKFLOW = "MAX Research Ground Local Acceptance"
+$phaseText = Get-Content -LiteralPath (Join-Path $Root "PHASE_MANIFEST.yaml") -Raw
+$gateSection = [regex]::Match($phaseText, '(?ms)^acceptance_gates:[ \t]*\r?\n(.*?)(?=^\S|\z)')
+if (-not $gateSection.Success) { throw "Cannot resolve active phase acceptance gates for local evidence" }
+$gateIds = @([regex]::Matches($gateSection.Groups[1].Value, '(?m)^\s+- id:\s*([a-z0-9_]+)\s*$') | ForEach-Object { $_.Groups[1].Value })
+foreach ($gateId in $gateIds) { [Environment]::SetEnvironmentVariable("RG_GATE_$gateId", $null) }
+$env:RG_STEP_reproducible_acceptance = if ($script:StepOutcomes["roadmap_governance"] -eq "success" -and $script:StepOutcomes["source_check"] -eq "success") { "success" } else { "failure" }
+$script:StepOutcomes["reproducible_acceptance"] = $env:RG_STEP_reproducible_acceptance
+& (Join-Path $Root "scripts\New-CiEvidence.ps1") -OutputDirectory $EvidenceDir
+if ($LASTEXITCODE -ne 0) { throw "Could not generate source-bound acceptance evidence" }
+$reportPath = Join-Path $EvidenceDir "acceptance.json"
+$report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+$report | Add-Member -NotePropertyName local_execution -NotePropertyValue ([ordered]@{
     started_utc = $StartedUtc.ToString("o")
     completed_utc = [DateTime]::UtcNow.ToString("o")
-    source = [ordered]@{
-        root = $Root
-        branch = $branch
-        commit_sha = $commit
-        tree_sha = $tree
-        clean = $true
-    }
+    root = $Root
+    branch = $branch
     environment = [ordered]@{
         rust = $rustVersion
         node = $nodeVersion
@@ -186,31 +228,30 @@ $report = [ordered]@{
         msvc_ready = $msvcReady
         webview2_runtime = $webviewVersion
     }
-    legacy_baseline = [ordered]@{
-        path = $baselinePath
-        accessed_by_runner = $false
-        evidence_limit = "The runner does not inspect host state outside the repository and cannot attest to activity by other processes."
-    }
-    gates = @($script:GateResults)
+    checks = @($script:GateResults)
+}) -Force
+$localFailures = @($script:GateResults | Where-Object status -eq "FAIL")
+$localBlocks = @($script:GateResults | Where-Object status -eq "ENVIRONMENT_BLOCKED")
+if ($localFailures.Count -gt 0) {
+    $report.automated_status = "FAILED"
+} elseif ($localBlocks.Count -gt 0 -and $report.automated_status -eq "AUTOMATED_PASS") {
+    $report.automated_status = "ENVIRONMENT_BLOCKED"
 }
+$json = $report | ConvertTo-Json -Depth 16
+[System.IO.File]::WriteAllText($reportPath, $json + "`n", [System.Text.UTF8Encoding]::new($false))
+$reportHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $reportPath).Hash.ToLowerInvariant()
+$checksumPath = Join-Path $EvidenceDir "SHA256SUMS.txt"
+[System.IO.File]::WriteAllText($checksumPath, "$reportHash  acceptance.json`n", [System.Text.UTF8Encoding]::new($false))
 $failed = @($script:GateResults | Where-Object status -eq "FAIL")
 $blocked = @($script:GateResults | Where-Object status -eq "ENVIRONMENT_BLOCKED")
-if ($failed.Count -gt 0) {
-    $report.automated_status = "FAILED"
-} elseif ($blocked.Count -gt 0) {
-    $report.automated_status = "ENVIRONMENT_BLOCKED"
-} else {
-    $report.automated_status = "AUTOMATED_PASS"
-}
-$reportPath = Join-Path $EvidenceDir "acceptance.json"
-$report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $reportPath -Encoding utf8
 Write-Host ""
 Write-Host "AUTOMATED_STATUS=$($report.automated_status)"
 Write-Host "OWNER_UI_STATUS=$($report.owner_ui_status)"
-Write-Host "OWNER_ACCEPTANCE=$($report.owner_acceptance)"
 Write-Host "SOURCE_COMMIT=$commit"
 Write-Host "SOURCE_TREE=$tree"
 Write-Host "EVIDENCE=$reportPath"
-if ($failed.Count -gt 0) { exit 1 }
-if ($blocked.Count -gt 0) { exit 2 }
+Write-Host "EVIDENCE_SHA256=$reportHash"
+if ($report.automated_status -eq "FAILED" -or $failed.Count -gt 0) { exit 1 }
+if ($report.automated_status -eq "ENVIRONMENT_BLOCKED" -or $blocked.Count -gt 0) { exit 2 }
+if ($report.automated_status -ne "AUTOMATED_PASS") { exit 3 }
 exit 0

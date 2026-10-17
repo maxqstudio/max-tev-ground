@@ -1,10 +1,9 @@
-# RG-R00 acceptance
+# RG-R01 acceptance
 
-RUN_ACCEPTANCE.ps1 is non-interactive. It checks the exact clean Git commit and tree, runs Rust formatting/tests/lints/build, CI evidence contract tests, frontend install/lint/typecheck/tests/build, Tauri desktop compilation without packaging, and roadmap synchronization. Output is saved under ignored artifacts/acceptance/ and includes per-command logs. It does not read, copy, or modify the legacy research baseline.
+Run `./RUN_ACCEPTANCE.ps1` from a PowerShell session on the authorized `work/rg-r01-data-ground` branch. The runner requires a clean candidate commit rooted at `D:\MAX_RESEARCH_GROUND`, applies the pinned Rust toolchain locally, checks Node/npm pins and Windows build prerequisites, then writes per-command logs and a checksummed `acceptance.json` under `artifacts/acceptance/rg-r01-*`.
 
-Gate outcomes are kept separate:
-- AUTOMATED_PASS: all local automated gates passed on the exact source SHA.
-- ENVIRONMENT_BLOCKED: a required local tool or prerequisite prevents a gate from running.
-- OWNER_UI_ACCEPTANCE_PENDING: the Owner has not reviewed the desktop UI. A compile or component fixture test does not satisfy this gate.
+The automated gates cover roadmap synchronization, evidence-contract negative tests, Rust formatting/tests/lints/build, frontend install/lint/typecheck/tests/build, and the Tauri desktop build when MSVC is available. CI maps each RG-R01 gate to the validation suites that exercise it and uploads a checksummed report bound to the workflow event SHA and Git tree. Rust command-boundary tests exercise a real source fixture through import, confirm, catalog, and inspect; frontend interaction tests are fixture-backed component tests. Neither is reported as an interactive Owner review.
 
-The runner never reports RG-R00 accepted, never unlocks RG-R01, and never promotes a champion. CI evidence is external to the committed implementation state: GitHub Actions publishes an acceptance artifact bound to the event commit and tree, with SHA-256 checksums, then signs the report with a GitHub artifact attestation on the repository's default branch. The artifact records workflow run identity and per-gate outcomes. The attestation proves report provenance and integrity, not successful gates or RG-R00 acceptance. A successful workflow does not prove the legacy host baseline was untouched or satisfy Owner UI review. No live or GUI acceptance test is started by the local script.
+The default automated runner is non-interactive. It does not open the desktop or launch a GUI test. Owner UI acceptance remains `OWNER_UI_ACCEPTANCE_PENDING` until the Owner reviews RG-R01. The legacy research importer is deferred; the acceptance runner does not read, copy, or modify that baseline. MT5 integration is not implemented and no terminal/account/order APIs are used. Local acceptance cannot attest to activity by unrelated processes. GitHub CI reports the legacy host state as `NOT_VERIFIED_BY_GITHUB_CI`.
+
+Statuses remain distinct: `AUTOMATED_PASS`, `ENVIRONMENT_BLOCKED`, `FAILED`, and `OWNER_UI_ACCEPTANCE_PENDING`. A successful compile alone does not satisfy acceptance. RG-R02–RG-R08 remain locked, and no live trading or automatic Champion promotion is part of this phase.
