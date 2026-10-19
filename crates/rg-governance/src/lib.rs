@@ -476,9 +476,9 @@ fn validate_acceptance_history(
             tree_sha.len() != 40 || !tree_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
         }) {
             return Err(format!(
-            "acceptance tree SHA for {} is malformed",
-            record.phase
-        ));
+                "acceptance tree SHA for {} is malformed",
+                record.phase
+            ));
         }
         let evidence = roadmap.phases[index]
             .acceptance_evidence
