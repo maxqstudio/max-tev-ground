@@ -8,42 +8,53 @@ import type { ActiveImportState, DatasetCatalogEntry, DatasetCatalogProgress, Im
 
 const fixtureSnapshot: FoundationSnapshot = {
   project: "MAX Research Ground",
-  current_phase: "RG-R01",
+  current_phase: "RG-R02",
   phase_lifecycle: "ACTIVE",
-  builder_status: "IN_PROGRESS",
+  builder_status: "NOT_STARTED",
   automated_status: "NOT_RUN",
   owner_ui_status: "PENDING",
   owner_acceptance: "PENDING",
   next_phase_unlocked: false,
   deliverables: {
-    source_adapters: "PLANNED",
-    import_wizard: "PLANNED",
-    quality_audit: "PLANNED",
-    temporal_contract: "PLANNED",
-    snapshots: "PLANNED",
-    dataset_registry: "PLANNED",
-    persistence: "PLANNED",
-    data_ground_ui: "PLANNED",
+    verified_input_authority: "PLANNED",
+    indicator_registry: "PLANNED",
+    causal_feature_engine: "PLANNED",
+    multi_timeframe_joins: "PLANNED",
+    immutable_feature_sets: "PLANNED",
+    resource_controls: "PLANNED",
+    feature_studio_ui: "PLANNED",
     acceptance_evidence: "PLANNED",
   },
   pages: [
     { id: "overview", status: "IMPLEMENTED" },
-    { id: "data-ground", status: "IN_PROGRESS" },
-    { id: "feature-studio", status: "PLANNED" },
+    { id: "data-ground", status: "OWNER_ACCEPTED" },
+    { id: "feature-studio", status: "ACTIVE_NOT_STARTED" },
     { id: "strategy-studio", status: "PLANNED" },
     { id: "model-lab", status: "PLANNED" },
     { id: "policy-studio", status: "PLANNED" },
     { id: "experiments", status: "PLANNED" },
     { id: "results", status: "PLANNED" },
   ],
-  accepted_phases: [{
-    phase: "RG-R00",
-    owner_acceptance: "OWNER_ACCEPTED",
-    owner_ui_status: "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED",
-    source_sha: "a1f7ada003d57a26dcd4dfa41e86ba62a5890bed",
-    ci_run_url: "https://github.com/maxqstudio/max-tev-ground/actions/runs/39037310698",
-    owner_issue_url: "https://github.com/maxqstudio/max-tev-ground/issues/1",
-  }],
+  accepted_phases: [
+    {
+      phase: "RG-R00",
+      owner_acceptance: "OWNER_ACCEPTED",
+      owner_ui_status: "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED",
+      source_sha: "a1f7ada003d57a26dcd4dfa41e86ba62a5890bed",
+      ci_run_url: "https://github.com/maxqstudio/max-tev-ground/actions/runs/39037310698",
+      owner_issue_url: "https://github.com/maxqstudio/max-tev-ground/issues/1",
+    },
+    {
+      phase: "RG-R01",
+      owner_acceptance: "OWNER_ACCEPTED",
+      owner_ui_status: "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED",
+      source_sha: "7f50b398ca272c4c84b5e5c01866945e9eda2a2a",
+      source_tree_sha: "46c8969bc31faa7f3efaa6474d5ced2322270623",
+      ci_run_url: "https://github.com/maxqstudio/max-tev-ground/actions/runs/39285471335",
+      owner_issue_url: "https://github.com/maxqstudio/max-tev-ground/issues/2#issuecomment-6269930193",
+      known_debts: ["cancelPreview may report a generic error when cancellation succeeds but registry refresh fails; unresolved UX debt, not fixed or manually tested."],
+    },
+  ],
 };
 
 const emptyCatalog: DatasetCatalogProgress = {
@@ -116,8 +127,19 @@ describe("desktop shell navigation", () => {
     expect(await screen.findByRole("heading", { name: "MAX Research Ground" })).toBeTruthy();
     expect(screen.getByText("NOT RUN")).toBeTruthy();
     expect(screen.getAllByText("LOCKED")).toHaveLength(2);
-    expect(screen.getByText("Source adapters")).toBeTruthy();
+    expect(screen.getByText("Verified input authority")).toBeTruthy();
     expect(screen.getByText(/waived, not tested/)).toBeTruthy();
+  });
+
+  it("shows the authorized Feature Studio handoff without presenting it as implemented", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Feature Studio/ }));
+    expect(await screen.findByRole("heading", { name: "Feature Studio implementation has not started" })).toBeTruthy();
+    expect(screen.getByText("ACTIVE NOT STARTED")).toBeTruthy();
+    expect(screen.getByText(/implementation handoff is pending/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Overview/ }));
+    expect(await screen.findByText(/Desktop UI and CSV import review were waived, NOT TESTED/)).toBeTruthy();
+    expect(screen.getByText(/Known UX debt \(unresolved\)/)).toBeTruthy();
   });
 
   it("shows bounded catalog verification progress and cancellation", async () => {

@@ -1,6 +1,6 @@
 schema_version: 1
 project: MAX Research Ground
-current_phase: RG-R01
+current_phase: RG-R02
 phases:
   - id: RG-R00
     name: Rust foundation, Tauri shell, governance, CI
@@ -10,11 +10,12 @@ phases:
   - id: RG-R01
     name: Data Ground
     objective: Add historical ingestion, dataset integrity, lineage, and data quality audit.
-    lifecycle: ACTIVE
+    lifecycle: ACCEPTED
+    acceptance_evidence: "Owner acceptance WITH_UI_REVIEW_WAIVED: https://github.com/maxqstudio/max-tev-ground/issues/2#issuecomment-6269930193; desktop UI and CSV import review were waived, not tested; source SHA 7f50b398ca272c4c84b5e5c01866945e9eda2a2a; source tree SHA 46c8969bc31faa7f3efaa6474d5ced2322270623; exact-main CI SUCCESS https://github.com/maxqstudio/max-tev-ground/actions/runs/39285471335; acceptance artifact rg-r01-evidence-39285471335-1 digest sha256:b7d6e6be850d150d8918d5a3331eb2c126c99749e13efbce61d8a891a0015d58; known unresolved cancelPreview cancel-to-refresh UX debt is preserved."
   - id: RG-R02
     name: Feature Studio
     objective: Add a versioned indicator registry and anti-lookahead feature engine.
-    lifecycle: PLANNED
+    lifecycle: ACTIVE
   - id: RG-R03
     name: Deterministic Strategy Engine
     objective: Add deterministic native Rust strategies and isolated strategy contracts.
