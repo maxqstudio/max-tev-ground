@@ -475,7 +475,10 @@ fn validate_acceptance_history(
         if record.source_tree_sha.as_ref().is_some_and(|tree_sha| {
             tree_sha.len() != 40 || !tree_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
         }) {
-            return Err(format!("acceptance tree SHA for {} is malformed", record.phase));
+            return Err(format!(
+            "acceptance tree SHA for {} is malformed",
+            record.phase
+        ));
         }
         let evidence = roadmap.phases[index]
             .acceptance_evidence
@@ -662,7 +665,10 @@ mod tests {
             accepted_r01.owner_ui_status,
             OwnerUiStatus::OwnerAcceptedWithUiReviewWaived
         );
-        assert_eq!(accepted_r01.source_sha, "7f50b398ca272c4c84b5e5c01866945e9eda2a2a");
+        assert_eq!(
+            accepted_r01.source_sha,
+            "7f50b398ca272c4c84b5e5c01866945e9eda2a2a"
+        );
         assert_eq!(
             accepted_r01.source_tree_sha.as_deref(),
             Some("46c8969bc31faa7f3efaa6474d5ced2322270623")
@@ -741,7 +747,9 @@ mod tests {
     #[test]
     fn rg_r01_gate_contract_remains_fixed_after_transition() {
         let mut phase = rg_r01_test_manifest();
-        phase.acceptance_gates.retain(|gate| gate.id != "owner_ui_acceptance");
+        phase
+            .acceptance_gates
+            .retain(|gate| gate.id != "owner_ui_acceptance");
         let error = validate_acceptance_gates(&phase).unwrap_err();
         assert!(error.contains("owner_ui_acceptance"));
     }
@@ -769,7 +777,9 @@ mod tests {
     fn rg_r02_gate_contract_is_exact_and_cannot_lose_a_mandatory_gate() {
         let mut phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
         assert_eq!(phase.phase, "RG-R02");
-        phase.acceptance_gates.retain(|gate| gate.id != "indicator_registry");
+        phase
+            .acceptance_gates
+            .retain(|gate| gate.id != "indicator_registry");
         assert!(validate_acceptance_gates(&phase)
             .unwrap_err()
             .contains("indicator_registry"));
@@ -793,13 +803,18 @@ mod tests {
             .iter()
             .find(|phase| phase.phase == "RG-R01")
             .unwrap();
-        assert_eq!(accepted.owner_acceptance, OwnerAcceptanceStatus::OwnerAccepted);
+        assert_eq!(
+            accepted.owner_acceptance,
+            OwnerAcceptanceStatus::OwnerAccepted
+        );
         assert_eq!(
             accepted.owner_ui_status,
             OwnerUiStatus::OwnerAcceptedWithUiReviewWaived
         );
         assert_ne!(accepted.owner_ui_status, OwnerUiStatus::OwnerAccepted);
-        assert!(accepted.known_debts[0].to_ascii_lowercase().contains("cancelpreview"));
+        assert!(accepted.known_debts[0]
+            .to_ascii_lowercase()
+            .contains("cancelpreview"));
     }
 
     #[test]

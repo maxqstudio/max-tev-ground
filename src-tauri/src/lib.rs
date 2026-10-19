@@ -96,8 +96,14 @@ mod tests {
     fn direct_command_boundary_never_claims_owner_acceptance() {
         let response = commands::get_foundation_status().unwrap();
         assert_eq!(response.current_phase, "RG-R02");
-        assert_eq!(response.builder_status, rg_governance::BuilderStatus::NotStarted);
-        assert_eq!(response.automated_status, rg_governance::AutomatedStatus::NotRun);
+        assert_eq!(
+            response.builder_status,
+            rg_governance::BuilderStatus::NotStarted
+        );
+        assert_eq!(
+            response.automated_status,
+            rg_governance::AutomatedStatus::NotRun
+        );
         assert_eq!(
             response.owner_acceptance,
             rg_governance::OwnerAcceptanceStatus::Pending
