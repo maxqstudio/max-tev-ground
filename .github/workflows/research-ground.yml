@@ -98,6 +98,11 @@ jobs:
         shell: pwsh
         run: ./scripts/Test-CiEvidence.ps1
 
+      - name: Desktop launcher regression tests
+        id: desktop_launcher_tests
+        shell: pwsh
+        run: ./scripts/Test-DesktopLauncher.ps1
+
       - name: Rust formatting
         id: rust_fmt
         shell: pwsh
