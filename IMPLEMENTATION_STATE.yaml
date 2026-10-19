@@ -1,20 +1,19 @@
 schema_version: 3
-current_phase: RG-R01
-builder_status: IMPLEMENTED
-automated_status: AUTOMATED_PASS
+current_phase: RG-R02
+builder_status: NOT_STARTED
+automated_status: NOT_RUN
 owner_ui_status: PENDING
 owner_acceptance: PENDING
 next_phase_unlocked: false
 deliverables:
-  source_adapters: TESTED
-  import_wizard: TESTED
-  quality_audit: TESTED
-  temporal_contract: TESTED
-  snapshots: TESTED
-  dataset_registry: TESTED
-  persistence: TESTED
-  data_ground_ui: TESTED
-  acceptance_evidence: TESTED
+  verified_input_authority: PLANNED
+  indicator_registry: PLANNED
+  causal_feature_engine: PLANNED
+  multi_timeframe_joins: PLANNED
+  immutable_feature_sets: PLANNED
+  resource_controls: PLANNED
+  feature_studio_ui: PLANNED
+  acceptance_evidence: PLANNED
 accepted_phases:
   - phase: RG-R00
     owner_acceptance: OWNER_ACCEPTED
@@ -22,3 +21,12 @@ accepted_phases:
     source_sha: a1f7ada003d57a26dcd4dfa41e86ba62a5890bed
     ci_run_url: https://github.com/maxqstudio/max-tev-ground/actions/runs/39037310698
     owner_issue_url: https://github.com/maxqstudio/max-tev-ground/issues/1
+  - phase: RG-R01
+    owner_acceptance: OWNER_ACCEPTED
+    owner_ui_status: OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED
+    source_sha: 7f50b398ca272c4c84b5e5c01866945e9eda2a2a
+    source_tree_sha: 46c8969bc31faa7f3efaa6474d5ced2322270623
+    ci_run_url: https://github.com/maxqstudio/max-tev-ground/actions/runs/39285471335
+    owner_issue_url: https://github.com/maxqstudio/max-tev-ground/issues/2#issuecomment-6269930193
+    known_debts:
+      - "cancelPreview may report a generic error when cancellation succeeds but registry refresh fails; unresolved UX debt, not fixed or manually tested."

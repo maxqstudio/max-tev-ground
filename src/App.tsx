@@ -38,6 +38,13 @@ const deliverableLabels: Record<string, string> = {
   desktop_shell: "Desktop shell",
   persistence: "SQLite persistence",
   governance: "Roadmap governance",
+  verified_input_authority: "Verified input authority",
+  indicator_registry: "Indicator registry",
+  causal_feature_engine: "Causal feature engine",
+  multi_timeframe_joins: "Multi-timeframe joins",
+  immutable_feature_sets: "Immutable feature sets",
+  resource_controls: "Resource controls",
+  feature_studio_ui: "Feature Studio UI",
 };
 
 function statusLabel(value: string): string {
@@ -49,6 +56,7 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<FoundationSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const currentPage = navigation.find((item) => item.id === activePage) ?? navigation[0];
+  const currentPageStatus = snapshot?.pages.find((page) => page.id === activePage)?.status ?? "PLANNED";
 
   useEffect(() => {
     let current = true;
@@ -97,7 +105,7 @@ export default function App() {
                 <Icon size={17} strokeWidth={1.8} aria-hidden="true" />
                 <span className="nav-label">{item.label}</span>
                 {pageStatus !== "IMPLEMENTED" ? (
-                  <span className="nav-phase">{pageStatus === "IN_PROGRESS" ? "ACTIVE" : pageStatus === "OWNER_ACCEPTED" ? "ACCEPTED" : item.phase}</span>
+                  <span className="nav-phase">{pageStatus === "IN_PROGRESS" || pageStatus === "ACTIVE_NOT_STARTED" ? "ACTIVE" : pageStatus === "OWNER_ACCEPTED" ? "ACCEPTED" : item.phase}</span>
                 ) : (
                   <span className="nav-index">{String(index + 1).padStart(2, "0")}</span>
                 )}
@@ -140,6 +148,7 @@ export default function App() {
             label={currentPage.label}
             phase={currentPage.phase}
             icon={currentPage.icon}
+            status={currentPageStatus === "IMPLEMENTED" ? "PLANNED" : currentPageStatus}
           />
         )}
       </main>
@@ -198,7 +207,11 @@ function Overview({
             </div>
             {snapshot.accepted_phases.map((accepted) => (
               <div className="status-footnote" key={accepted.phase}>
-                {accepted.phase}: Owner accepted. UI review {accepted.owner_ui_status === "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED" ? "waived, not tested" : statusLabel(accepted.owner_ui_status).toLowerCase()}.
+                <div>{accepted.phase}: Owner accepted. {accepted.phase === "RG-R01" ? "Desktop UI and CSV import review were waived, NOT TESTED." : "UI review " + (accepted.owner_ui_status === "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED" ? "waived, not tested" : statusLabel(accepted.owner_ui_status).toLowerCase()) + "."}</div>
+                <div>Source <code>{accepted.source_sha}</code>{accepted.source_tree_sha ? <> · tree <code>{accepted.source_tree_sha}</code></> : null}</div>
+                {accepted.known_debts?.map((debt) => (
+                  <div key={debt}>Known UX debt (unresolved): {debt}</div>
+                ))}
               </div>
             ))}
           </section>
@@ -260,28 +273,32 @@ function PlannedPage({
   label: string;
   phase: string;
   icon: typeof Activity;
-  status?: "IN_PROGRESS" | "PLANNED" | "OWNER_ACCEPTED";
+  status?: "IN_PROGRESS" | "ACTIVE_NOT_STARTED" | "PLANNED" | "OWNER_ACCEPTED";
 }) {
   const isInProgress = status === "IN_PROGRESS";
+  const isAuthorizedNotStarted = status === "ACTIVE_NOT_STARTED";
+  const isAuthorized = isInProgress || isAuthorizedNotStarted;
   return (
     <div className="page-content planned-content">
       <div className="page-heading">
         <div>
           <div className="eyebrow">RESEARCH MODULE</div>
           <h1>{label}</h1>
-          <p className="page-intro">{isInProgress ? "This authorized phase is under implementation." : "This module is reserved for a later roadmap phase."}</p>
+          <p className="page-intro">{isInProgress ? "This authorized phase is under implementation." : isAuthorizedNotStarted ? "This phase is authorized; implementation handoff is pending." : "This module is reserved for a later roadmap phase."}</p>
         </div>
-        <span className={"status-pill " + (isInProgress ? "status-active" : "status-planned")}>{statusLabel(status)}</span>
+        <span className={"status-pill " + (isAuthorized ? "status-active" : "status-planned")}>{statusLabel(status)}</span>
       </div>
       <section className="planned-panel">
         <div className="planned-icon"><Icon size={22} strokeWidth={1.7} aria-hidden="true" /></div>
         <div>
           <div className="eyebrow">{phase}</div>
-          <h2>{isInProgress ? `${label} is in progress` : `${label} is not implemented yet`}</h2>
+          <h2>{isInProgress ? `${label} is in progress` : isAuthorizedNotStarted ? `${label} implementation has not started` : `${label} is not implemented yet`}</h2>
           <p>
             {isInProgress
               ? "The phase is authorized, but the data workflow is not available in this transition build."
-              : "The workspace keeps this destination visible for orientation. It will become functional only when its phase is authorized and its acceptance gates are met."}
+              : isAuthorizedNotStarted
+                ? "This phase is authorized for implementation, but its feature workflow is not available yet."
+                : "The workspace keeps this destination visible for orientation. It will become functional only when its phase is authorized and its acceptance gates are met."}
           </p>
         </div>
       </section>

@@ -19,6 +19,9 @@ $phaseText = Get-Content -LiteralPath (Join-Path $root "PHASE_MANIFEST.yaml") -R
 $gateSection = [regex]::Match($phaseText, '(?ms)^acceptance_gates:[ \t]*\r?\n(.*?)(?=^\S|\z)')
 if (-not $gateSection.Success) { throw "Could not read phase acceptance gates" }
 $gateIds = @([regex]::Matches($gateSection.Groups[1].Value, '(?m)^\s+- id:\s*([a-z0-9_]+)\s*$') | ForEach-Object { $_.Groups[1].Value })
+$manifestPhase = [regex]::Match($phaseText, '(?m)^phase:\s*(RG-R\d{2})\s*$').Groups[1].Value
+$implementationText = Get-Content -LiteralPath (Join-Path $root "IMPLEMENTATION_STATE.yaml") -Raw
+$expectedOwnerStatus = [regex]::Match($implementationText, '(?m)^owner_ui_status:\s*([A-Z_]+)\s*$').Groups[1].Value
 foreach ($id in $gateIds) { $environmentNames += "RG_GATE_$id" }
 $previousValues = @{}
 foreach ($name in $environmentNames) {
@@ -29,8 +32,8 @@ try {
     $env:GITHUB_WORKSPACE = $root
     $env:GITHUB_SHA = $sourceSha
     $env:GITHUB_REPOSITORY = "maxqstudio/max-tev-ground"
-    $env:GITHUB_REF = "refs/heads/work/rg-r01-data-ground"
-    $env:GITHUB_REF_NAME = "work/rg-r01-data-ground"
+    $env:GITHUB_REF = "refs/heads/fixture/ci-evidence"
+    $env:GITHUB_REF_NAME = "fixture/ci-evidence"
     $env:GITHUB_RUN_ID = "fixture-run"
     $env:GITHUB_RUN_ATTEMPT = "1"
     $env:GITHUB_EVENT_NAME = "push"
@@ -46,18 +49,31 @@ try {
     & $generator -OutputDirectory $passingDirectory
     $passingPath = Join-Path $passingDirectory "acceptance.json"
     $passing = Get-Content -LiteralPath $passingPath -Raw | ConvertFrom-Json
-    if ($passing.automated_status -ne "AUTOMATED_PASS") { throw "Passing fixture did not report AUTOMATED_PASS" }
-    if ($passing.phase -ne "RG-R01") { throw "Acceptance report phase is not synchronized with the active phase" }
+    if ($passing.phase -ne $manifestPhase) { throw "Acceptance report phase is not synchronized with the active phase" }
     if ($passing.gates.Count -ne $gateIds.Count) { throw "Acceptance report omitted a declared phase gate" }
     if ($passing.source.commit_sha -ne $sourceSha -or -not $passing.source.exact_event_match) { throw "Acceptance report did not bind to the exact event SHA" }
     if ($passing.source.tree_sha -notmatch '^[0-9a-f]{40,64}$') { throw "Acceptance report omitted the Git tree SHA" }
     if ($passing.workflow.run_id -ne "fixture-run") { throw "Acceptance report omitted workflow run identity" }
     if (($passing.gates | Where-Object id -eq "reproducible_acceptance").status -ne "PASS") { throw "Exact source/governance gate did not pass" }
     if ($passing.legacy_baseline_status -ne "NOT_VERIFIED_BY_GITHUB_CI") { throw "Legacy baseline status was overstated" }
-    if ($passing.owner_ui_status -ne "OWNER_UI_ACCEPTANCE_PENDING") { throw "Owner UI review was not left pending" }
-    if (($passing.gates | Where-Object id -eq "owner_ui_acceptance").status -ne "OWNER_UI_ACCEPTANCE_PENDING") { throw "Owner UI gate was not left pending" }
-    $unpassedAutomatedGates = @($passing.gates | Where-Object { $_.id -ne "owner_ui_acceptance" -and $_.status -ne "PASS" })
-    if ($unpassedAutomatedGates.Count -ne 0) { throw "A mapped acceptance gate did not inherit its passing validation evidence" }
+    $expectedUiReportStatus = switch ($expectedOwnerStatus) {
+        "OWNER_ACCEPTED" { "OWNER_ACCEPTED" }
+        "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED" { "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED" }
+        default { "OWNER_UI_ACCEPTANCE_PENDING" }
+    }
+    if ($passing.owner_ui_status -ne $expectedUiReportStatus) { throw "Owner UI status did not match the implementation state" }
+    if (($passing.gates | Where-Object id -eq "owner_ui_acceptance").status -ne $expectedUiReportStatus) { throw "Owner UI gate status did not match the implementation state" }
+    $reproducibleGate = $passing.gates | Where-Object id -eq "reproducible_acceptance"
+    if ($reproducibleGate.status -ne "PASS") { throw "Exact source/governance gate did not pass" }
+    if ($manifestPhase -eq "RG-R02") {
+        $unimplementedGates = @($passing.gates | Where-Object { $_.id -notin @("owner_ui_acceptance", "reproducible_acceptance") -and $_.status -ne "NOT_RUN" })
+        if ($unimplementedGates.Count -gt 0) { throw "Unimplemented RG-R02 acceptance gates were reported as executed" }
+        if ($passing.automated_status -ne "NOT_RUN") { throw "Unimplemented RG-R02 acceptance was not kept NOT_RUN" }
+    } else {
+        $unpassedAutomatedGates = @($passing.gates | Where-Object { $_.id -ne "owner_ui_acceptance" -and $_.status -ne "PASS" })
+        if ($unpassedAutomatedGates.Count -ne 0) { throw "A mapped acceptance gate did not inherit its passing validation evidence" }
+        if ($passing.automated_status -ne "AUTOMATED_PASS") { throw "Passing automated gates did not report AUTOMATED_PASS" }
+    }
     $checksumLine = (Get-Content -LiteralPath (Join-Path $passingDirectory "SHA256SUMS.txt") -Raw).Trim()
     $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $passingPath).Hash.ToLowerInvariant()
     if ($checksumLine -ne "$actualHash  acceptance.json") { throw "Acceptance evidence checksum is invalid" }
@@ -68,14 +84,15 @@ try {
     $failing = Get-Content -LiteralPath (Join-Path $failingDirectory "acceptance.json") -Raw | ConvertFrom-Json
     if ($failing.automated_status -ne "FAILED") { throw "Failed fixture was not reported as FAILED" }
     [Environment]::SetEnvironmentVariable("RG_STEP_rust_tests", "success")
-    [Environment]::SetEnvironmentVariable("RG_GATE_csv_ingestion", "failure")
+    $failureGateId = $gateIds | Where-Object { $_ -ne "owner_ui_acceptance" } | Select-Object -First 1
+    [Environment]::SetEnvironmentVariable("RG_GATE_$failureGateId", "failure")
     $gateFailureDirectory = Join-Path $fixtureRoot "gate-failure"
     & $generator -OutputDirectory $gateFailureDirectory
     $gateFailure = Get-Content -LiteralPath (Join-Path $gateFailureDirectory "acceptance.json") -Raw | ConvertFrom-Json
     if ($gateFailure.automated_status -ne "FAILED") { throw "A failed phase gate was not reported as FAILED" }
-    if (($gateFailure.gates | Where-Object id -eq "csv_ingestion").status -ne "FAIL") { throw "A failed CSV gate was not represented accurately" }
+    if (($gateFailure.gates | Where-Object id -eq $failureGateId).status -ne "FAIL") { throw "A failed active-phase gate was not represented accurately" }
 
-    [Environment]::SetEnvironmentVariable("RG_GATE_csv_ingestion", "success")
+    [Environment]::SetEnvironmentVariable("RG_GATE_$failureGateId", "success")
     [Environment]::SetEnvironmentVariable("RG_STEP_frontend_tests", "skipped")
     $skippedDirectory = Join-Path $fixtureRoot "skipped"
     & $generator -OutputDirectory $skippedDirectory
