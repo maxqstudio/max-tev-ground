@@ -482,18 +482,28 @@ export default function DataGround() {
     if (!preview) return;
     setError(null);
     setBusy("confirming");
+    let result: ImportCommitResult;
     try {
-      const result = await invoke<ImportCommitResult>("confirm_data_import", { jobId: preview.jobId });
-      const nextDatasets = await refreshRegistry();
+      result = await invoke<ImportCommitResult>("confirm_data_import", { jobId: preview.jobId });
+    } catch (reason) {
+      // The backend consumes the prepared session before committing, so the preview can no longer be confirmed or cancelled.
       setPreview(null);
       setActiveJobId(null);
-      setSelectedSource(null);
-      setInspection(null);
-      setSelectedDataset(nextDatasets.find((item) => item.dataset_id === result.dataset_id) ?? null);
-      setNotice(`${result.disposition === "REUSED" ? "Existing dataset reused" : "Dataset frozen and registered"}: ${result.dataset_id} · ${displayStatus(result.status)}.`);
-    } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       try { await refreshRegistry(); } catch { /* retain the commit diagnostic */ }
+      setBusy(null);
+      return;
+    }
+    setPreview(null);
+    setActiveJobId(null);
+    setSelectedSource(null);
+    setInspection(null);
+    setNotice(`${result.disposition === "REUSED" ? "Existing dataset reused" : "Dataset frozen and registered"}: ${result.dataset_id} · ${displayStatus(result.status)}.`);
+    try {
+      const nextDatasets = await refreshRegistry();
+      setSelectedDataset(nextDatasets.find((item) => item.dataset_id === result.dataset_id) ?? null);
+    } catch (reason) {
+      setError(`The import was committed, but the dataset registry did not refresh: ${reason instanceof Error ? reason.message : String(reason)}. Use Refresh dataset registry to retry.`);
     } finally {
       setBusy(null);
     }

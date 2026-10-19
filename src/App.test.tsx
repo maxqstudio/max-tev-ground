@@ -55,6 +55,42 @@ const emptyCatalog: DatasetCatalogProgress = {
   error: null,
 };
 
+const freezeJobId = "018f4c4f-7d9b-7b9f-a70e-92bb7cf04c61";
+
+function sourceInspectionFixture(fileName: string): SourceInspection {
+  return {
+    file_name: fileName,
+    extension: "csv",
+    size_bytes: 302,
+    headers: ["timestamp", "symbol", "timeframe", "open", "high", "low", "close", "volume"],
+    sample_rows: [{ timestamp: "2024-01-08T00:00:00Z", symbol: "EURUSD.m", timeframe: "H1", open: "1.1", high: "1.2", low: "1.0", close: "1.15", volume: "4" }],
+  };
+}
+
+function previewSessionFixture(sourceName: string): ImportPreviewSession {
+  return {
+    jobId: freezeJobId,
+    preview: {
+      dataset_id: `ds_${"a".repeat(64)}`,
+      fingerprint: "a".repeat(64),
+      status: "READY",
+      source_file_name: sourceName,
+      source_format: "csv",
+      source_size_bytes: 302,
+      source_sha256: "b".repeat(64),
+      raw_sha256: "b".repeat(64),
+      canonical_bars_sha256: "c".repeat(64),
+      canonical_bars_fingerprint: "d".repeat(64),
+      parquet_sha256: "c".repeat(64),
+      manifest_sha256: "e".repeat(64),
+      bar_count: 1,
+      series_count: 1,
+      series: [{ symbol: "EURUSD.m", timeframe: "H1", market_role: "TARGET", bar_count: 1, first_open_utc: "2024-01-08T00:00:00+00:00", last_open_utc: "2024-01-08T00:00:00+00:00", missing_bars: 0, closed_session_bars: 0, unclassified_gap_bars: 0 }],
+      quality_audit: { duplicate_bars: 0, descending_bars: 0, missing_bars: 0, closed_session_bars: 0, unclassified_gap_bars: 0, gaps: [] },
+    },
+  };
+}
+
 describe("desktop shell navigation", () => {
   beforeAll(() => {
     Object.defineProperty(window, "crypto", {
@@ -173,34 +209,8 @@ describe("desktop shell navigation", () => {
     let activeImport: ActiveImportState | null = null;
     const previewRequests: ImportRequest[] = [];
     const sourceName = "synthetic-fixture-eurusd.csv";
-    const inspection: SourceInspection = {
-      file_name: sourceName,
-      extension: "csv",
-      size_bytes: 302,
-      headers: ["timestamp", "symbol", "timeframe", "open", "high", "low", "close", "volume"],
-      sample_rows: [{ timestamp: "2024-01-08T00:00:00Z", symbol: "EURUSD.m", timeframe: "H1", open: "1.1", high: "1.2", low: "1.0", close: "1.15", volume: "4" }],
-    };
-    const preview: ImportPreviewSession = {
-      jobId: "018f4c4f-7d9b-7b9f-a70e-92bb7cf04c61",
-      preview: {
-        dataset_id: `ds_${"a".repeat(64)}`,
-        fingerprint: "a".repeat(64),
-        status: "READY",
-        source_file_name: sourceName,
-        source_format: "csv",
-        source_size_bytes: 302,
-        source_sha256: "b".repeat(64),
-        raw_sha256: "b".repeat(64),
-        canonical_bars_sha256: "c".repeat(64),
-        canonical_bars_fingerprint: "d".repeat(64),
-        parquet_sha256: "c".repeat(64),
-        manifest_sha256: "e".repeat(64),
-        bar_count: 1,
-        series_count: 1,
-        series: [{ symbol: "EURUSD.m", timeframe: "H1", market_role: "TARGET", bar_count: 1, first_open_utc: "2024-01-08T00:00:00+00:00", last_open_utc: "2024-01-08T00:00:00+00:00", missing_bars: 0, closed_session_bars: 0, unclassified_gap_bars: 0 }],
-        quality_audit: { duplicate_bars: 0, descending_bars: 0, missing_bars: 0, closed_session_bars: 0, unclassified_gap_bars: 0, gaps: [] },
-      },
-    };
+    const inspection = sourceInspectionFixture(sourceName);
+    const preview = previewSessionFixture(sourceName);
     const dataset: DatasetCatalogEntry = {
       dataset_id: preview.preview.dataset_id,
       fingerprint: preview.preview.fingerprint,
@@ -269,6 +279,96 @@ describe("desktop shell navigation", () => {
     expect(screen.getByText("READY")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Inspect" })).toBeTruthy();
     expect(screen.getByText("IMPORTED")).toBeTruthy();
+  });
+
+  it("releases a failed confirmation so the stale preview and its controls are not offered", async () => {
+    const sourceName = "synthetic-fixture-failed-commit.csv";
+    const inspection = sourceInspectionFixture(sourceName);
+    const preview = previewSessionFixture(sourceName);
+    let activeImport: ActiveImportState | null = null;
+    mockIPC((command) => {
+      if (command === "get_foundation_status") return fixtureSnapshot;
+      if (command === "start_dataset_catalog_verification") return emptyCatalog;
+      if (command === "get_dataset_catalog_progress") return null;
+      if (command === "get_active_data_import") return activeImport;
+      if (command === "list_import_attempts") return [];
+      if (command === "select_data_source") return { selectionId: "failed-commit-token", fileName: sourceName };
+      if (command === "inspect_selected_source") return { selectionId: "failed-commit-token", inspection };
+      if (command === "preview_data_import") {
+        activeImport = { state: "PREPARED", session: preview };
+        return preview;
+      }
+      if (command === "confirm_data_import") {
+        // The backend removes the prepared session before committing, so a failed commit leaves nothing to confirm or cancel.
+        activeImport = null;
+        return Promise.reject("dataset commit failed: fixture persistence failure");
+      }
+      return undefined;
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Data Ground/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose CSV or Parquet" }));
+    await screen.findByText(sourceName);
+    fireEvent.change(screen.getByLabelText("Default symbol"), { target: { value: "EURUSD.m" } });
+    fireEvent.change(screen.getByLabelText("Broker"), { target: { value: "Fixture Broker" } });
+    fireEvent.change(screen.getByLabelText("Server"), { target: { value: "Fixture Server" } });
+    fireEvent.click(screen.getByRole("button", { name: "Validate and preview" }));
+    await screen.findByRole("heading", { name: /Audit complete/ });
+    fireEvent.click(screen.getByRole("button", { name: "Freeze and register dataset" }));
+
+    expect(await screen.findByText(/dataset commit failed/)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: /Audit complete/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Freeze and register dataset" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel preview" })).toBeNull();
+    expect((screen.getByRole("button", { name: "Choose CSV or Parquet" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Validate and preview" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("reports a committed import as registered when only the catalogue refresh fails afterwards", async () => {
+    const sourceName = "synthetic-fixture-refresh-failure.csv";
+    const inspection = sourceInspectionFixture(sourceName);
+    const preview = previewSessionFixture(sourceName);
+    let committed = false;
+    let activeImport: ActiveImportState | null = null;
+    mockIPC((command) => {
+      if (command === "get_foundation_status") return fixtureSnapshot;
+      if (command === "start_dataset_catalog_verification") {
+        return committed ? Promise.reject("catalog verifier could not start: fixture refresh failure") : emptyCatalog;
+      }
+      if (command === "get_dataset_catalog_progress") return null;
+      if (command === "get_active_data_import") return activeImport;
+      if (command === "list_import_attempts") return [];
+      if (command === "select_data_source") return { selectionId: "refresh-failure-token", fileName: sourceName };
+      if (command === "inspect_selected_source") return { selectionId: "refresh-failure-token", inspection };
+      if (command === "preview_data_import") {
+        activeImport = { state: "PREPARED", session: preview };
+        return preview;
+      }
+      if (command === "confirm_data_import") {
+        committed = true;
+        activeImport = null;
+        return { dataset_id: preview.preview.dataset_id, fingerprint: preview.preview.fingerprint, status: "READY", disposition: "IMPORTED" };
+      }
+      return undefined;
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Data Ground/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose CSV or Parquet" }));
+    await screen.findByText(sourceName);
+    fireEvent.change(screen.getByLabelText("Default symbol"), { target: { value: "EURUSD.m" } });
+    fireEvent.change(screen.getByLabelText("Broker"), { target: { value: "Fixture Broker" } });
+    fireEvent.change(screen.getByLabelText("Server"), { target: { value: "Fixture Server" } });
+    fireEvent.click(screen.getByRole("button", { name: "Validate and preview" }));
+    await screen.findByRole("heading", { name: /Audit complete/ });
+    fireEvent.click(screen.getByRole("button", { name: "Freeze and register dataset" }));
+
+    expect(await screen.findByText(/Dataset frozen and registered/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Freeze and register dataset" })).toBeNull();
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("committed, but the dataset registry did not refresh");
+    expect(alert.textContent).toContain("catalog verifier could not start");
   });
 
   it("keeps an explicit preview cancel path before dataset registration", async () => {
