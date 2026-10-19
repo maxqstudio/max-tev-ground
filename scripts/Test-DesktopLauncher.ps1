@@ -61,13 +61,9 @@ try {
 
     # A command that never reports an exit code must not be treated as success.
     $silentLog = Join-Path $fixtureRoot "silent.log"
-    $silentThrew = $false
-    try {
-        Invoke-LoggedNativeCommand -LogPath $silentLog -Command { Write-Output "no native process ran" } | Out-Null
-    } catch {
-        $silentThrew = $true
-    }
-    Assert-That $silentThrew "A command without a native exit code was accepted as success"
+    $silentExit = Invoke-LoggedNativeCommand -LogPath $silentLog -Command { Write-Output "no native process ran" }
+    Assert-That ($silentExit -eq -1) "A command without a native exit code returned $silentExit instead of -1"
+    Assert-That ((Get-Content -LiteralPath $silentLog -Raw) -match 'No native process reported an exit code') "Missing exit code was not recorded in the log"
 
     # RG-R01 acceptance layout on the exact clean commit with a matching tree.
     $r01 = Find-InFixture "r01-exact" (New-AcceptanceReport "RG-R01" "RG-R01" $commit $tree $true "AUTOMATED_PASS" "PASS") -WithExecutable

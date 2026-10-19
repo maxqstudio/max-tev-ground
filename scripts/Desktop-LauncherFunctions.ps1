@@ -16,7 +16,11 @@ function Invoke-LoggedNativeCommand {
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
-    if ($null -eq $global:LASTEXITCODE) { throw "The native command did not report an exit code. Log: $LogPath" }
+    if ($null -eq $global:LASTEXITCODE) {
+        # Returning -1 instead of throwing keeps the caught case out of the error stream; callers treat any value other than 0 as failure.
+        Add-Content -LiteralPath $LogPath -Value "No native process reported an exit code."
+        return -1
+    }
     return [int]$global:LASTEXITCODE
 }
 
