@@ -16,6 +16,21 @@ const REQUIRED_RG_R00_GATES: [&str; 9] = [
     "exact_source_evidence",
     "owner_ui_acceptance",
 ];
+const REQUIRED_RG_R01_GATES: [&str; 13] = [
+    "csv_ingestion",
+    "parquet_ingestion",
+    "multi_market_timeframe",
+    "quality_audit",
+    "temporal_contract",
+    "snapshot_integrity",
+    "dataset_registry",
+    "atomicity_and_cancel",
+    "path_safety",
+    "data_ground_ipc_ui",
+    "persistence_migrations",
+    "reproducible_acceptance",
+    "owner_ui_acceptance",
+];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,9 +95,29 @@ pub struct ImplementationState {
     pub builder_status: BuilderStatus,
     pub automated_status: AutomatedStatus,
     pub owner_ui_status: OwnerUiStatus,
-    pub owner_acceptance: OwnerUiStatus,
+    pub owner_acceptance: OwnerAcceptanceStatus,
     pub next_phase_unlocked: bool,
     pub deliverables: BTreeMap<String, DeliveryStatus>,
+    #[serde(default)]
+    pub accepted_phases: Vec<PhaseAcceptanceRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PhaseAcceptanceRecord {
+    pub phase: String,
+    pub owner_acceptance: OwnerAcceptanceStatus,
+    pub owner_ui_status: OwnerUiStatus,
+    pub source_sha: String,
+    pub ci_run_url: String,
+    pub owner_issue_url: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OwnerAcceptanceStatus {
+    Pending,
+    OwnerAccepted,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -106,6 +141,7 @@ pub enum AutomatedStatus {
 pub enum OwnerUiStatus {
     Pending,
     OwnerAccepted,
+    OwnerAcceptedWithUiReviewWaived,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -127,16 +163,17 @@ pub struct GovernanceSnapshot {
     pub builder_status: BuilderStatus,
     pub automated_status: AutomatedStatus,
     pub owner_ui_status: OwnerUiStatus,
-    pub owner_acceptance: OwnerUiStatus,
+    pub owner_acceptance: OwnerAcceptanceStatus,
     pub next_phase_unlocked: bool,
     pub deliverables: BTreeMap<String, DeliveryStatus>,
+    pub accepted_phases: Vec<PhaseAcceptanceRecord>,
     pub pages: Vec<PageSnapshot>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PageSnapshot {
     pub id: &'static str,
-    pub status: &'static str,
+    pub status: String,
 }
 
 #[derive(Debug)]
@@ -209,8 +246,8 @@ fn validate_sync(
     implementation: &ImplementationState,
 ) -> Result<(), String> {
     if roadmap.schema_version != 1
-        || phase.schema_version != 2
-        || implementation.schema_version != 2
+        || phase.schema_version != 3
+        || implementation.schema_version != 3
     {
         return Err("unsupported governance schema version".into());
     }
@@ -267,6 +304,7 @@ fn validate_sync(
     {
         return Err("a later phase has been activated before the current phase".into());
     }
+    validate_acceptance_history(roadmap, implementation, active_index)?;
     if phase.phase != roadmap.current_phase || implementation.current_phase != roadmap.current_phase
     {
         return Err(
@@ -295,10 +333,16 @@ fn validate_sync(
     if declared != recorded {
         return Err("phase manifest and implementation state deliverables are out of sync".into());
     }
-    if implementation.owner_acceptance == OwnerUiStatus::OwnerAccepted
-        && implementation.owner_ui_status != OwnerUiStatus::OwnerAccepted
+    if implementation.owner_acceptance == OwnerAcceptanceStatus::OwnerAccepted
+        && implementation.owner_ui_status == OwnerUiStatus::Pending
     {
-        return Err("Owner acceptance cannot precede Owner UI acceptance".into());
+        return Err("Owner acceptance cannot precede a recorded UI decision or waiver".into());
+    }
+    if active[0].lifecycle == Lifecycle::Active
+        && (implementation.owner_acceptance != OwnerAcceptanceStatus::Pending
+            || implementation.owner_ui_status != OwnerUiStatus::Pending)
+    {
+        return Err("an active phase cannot claim Owner acceptance or UI review".into());
     }
     if implementation.next_phase_unlocked {
         return Err("implementation state must not unlock a later phase automatically".into());
@@ -315,8 +359,10 @@ fn validate_acceptance_gates(phase: &PhaseManifest) -> Result<(), String> {
         let id = gate.id.trim();
         if id.is_empty()
             || gate.id != id
-            || gate.requirement.trim().is_empty()
-            || gate.evidence.trim().is_empty()
+            || gate.requirement.trim().len() < 20
+            || gate.evidence.trim().len() < 20
+            || is_placeholder(&gate.requirement)
+            || is_placeholder(&gate.evidence)
         {
             return Err("phase manifest contains an acceptance gate without an ID, requirement, or evidence".into());
         }
@@ -326,16 +372,106 @@ fn validate_acceptance_gates(phase: &PhaseManifest) -> Result<(), String> {
             ));
         }
     }
-    if phase.phase == "RG-R00" {
-        let missing: Vec<_> = REQUIRED_RG_R00_GATES
-            .iter()
-            .filter(|required| !ids.contains(**required))
-            .copied()
-            .collect();
-        if !missing.is_empty() {
+    let required = match phase.phase.as_str() {
+        "RG-R00" => Some(REQUIRED_RG_R00_GATES.as_slice()),
+        "RG-R01" => Some(REQUIRED_RG_R01_GATES.as_slice()),
+        _ => None,
+    };
+    if let Some(required) = required {
+        let required_set: std::collections::BTreeSet<_> = required.iter().copied().collect();
+        let missing: Vec<_> = required_set.difference(&ids).copied().collect();
+        let unexpected: Vec<_> = ids.difference(&required_set).copied().collect();
+        if !missing.is_empty() || !unexpected.is_empty() {
             return Err(format!(
-                "RG-R00 is missing mandatory acceptance gates: {}",
-                missing.join(", ")
+                "{} acceptance gates do not match the mandatory contract (missing: {}; unexpected: {})",
+                phase.phase,
+                missing.join(", "),
+                unexpected.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_placeholder(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_uppercase();
+    ["TODO", "TBD", "PLACEHOLDER", "TBA", "N/A"]
+        .iter()
+        .any(|marker| normalized == *marker || normalized.starts_with(&format!("{marker}:")))
+}
+
+fn validate_acceptance_history(
+    roadmap: &Roadmap,
+    implementation: &ImplementationState,
+    active_index: usize,
+) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for record in &implementation.accepted_phases {
+        if !seen.insert(record.phase.as_str()) {
+            return Err(format!("duplicate acceptance history for {}", record.phase));
+        }
+        let Some(index) = roadmap
+            .phases
+            .iter()
+            .position(|phase| phase.id == record.phase)
+        else {
+            return Err(format!(
+                "acceptance history references unknown phase {}",
+                record.phase
+            ));
+        };
+        if index >= active_index || roadmap.phases[index].lifecycle != Lifecycle::Accepted {
+            return Err(format!(
+                "acceptance history for {} is not a prior accepted phase",
+                record.phase
+            ));
+        }
+        if record.owner_acceptance != OwnerAcceptanceStatus::OwnerAccepted {
+            return Err(format!(
+                "accepted phase {} lacks Owner acceptance",
+                record.phase
+            ));
+        }
+        if record.source_sha.len() != 40
+            || !record
+                .source_sha
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || !record.ci_run_url.starts_with("https://github.com/")
+            || !record.owner_issue_url.starts_with("https://github.com/")
+        {
+            return Err(format!(
+                "acceptance evidence for {} is incomplete or malformed",
+                record.phase
+            ));
+        }
+        let evidence = roadmap.phases[index]
+            .acceptance_evidence
+            .as_deref()
+            .unwrap_or_default();
+        if !evidence.contains(&record.source_sha)
+            || !evidence.contains(&record.ci_run_url)
+            || !evidence.contains(&record.owner_issue_url)
+        {
+            return Err(format!(
+                "roadmap acceptance evidence does not match the recorded evidence for {}",
+                record.phase
+            ));
+        }
+        if record.owner_ui_status == OwnerUiStatus::OwnerAcceptedWithUiReviewWaived
+            && !evidence.to_ascii_lowercase().contains("waived, not tested")
+        {
+            return Err(format!(
+                "UI waiver for {} must state that review was not tested",
+                record.phase
+            ));
+        }
+    }
+    for phase in roadmap.phases.iter().take(active_index) {
+        if phase.lifecycle == Lifecycle::Accepted && !seen.contains(phase.id.as_str()) {
+            return Err(format!(
+                "accepted phase {} has no structured Owner evidence",
+                phase.id
             ));
         }
     }
@@ -349,6 +485,38 @@ fn snapshot(documents: Documents) -> Result<GovernanceSnapshot, String> {
         .iter()
         .find(|phase| phase.id == documents.roadmap.current_phase)
         .ok_or_else(|| "current phase missing".to_owned())?;
+    let page_phases = [
+        ("data-ground", "RG-R01"),
+        ("feature-studio", "RG-R02"),
+        ("strategy-studio", "RG-R03"),
+        ("model-lab", "RG-R04"),
+        ("policy-studio", "RG-R05"),
+        ("experiments", "RG-R06"),
+        ("results", "RG-R07"),
+    ];
+    let pages = std::iter::once(PageSnapshot {
+        id: "overview",
+        status: "IMPLEMENTED".into(),
+    })
+    .chain(page_phases.into_iter().map(|(id, phase_id)| {
+        let lifecycle = documents
+            .roadmap
+            .phases
+            .iter()
+            .find(|phase| phase.id == phase_id)
+            .map(|phase| phase.lifecycle)
+            .unwrap_or(Lifecycle::Planned);
+        PageSnapshot {
+            id,
+            status: match lifecycle {
+                Lifecycle::Active => "IN_PROGRESS",
+                Lifecycle::Accepted => "OWNER_ACCEPTED",
+                Lifecycle::Planned => "PLANNED",
+            }
+            .into(),
+        }
+    }))
+    .collect();
     Ok(GovernanceSnapshot {
         project: documents.roadmap.project,
         current_phase: documents.roadmap.current_phase,
@@ -359,40 +527,8 @@ fn snapshot(documents: Documents) -> Result<GovernanceSnapshot, String> {
         owner_acceptance: documents.implementation.owner_acceptance,
         next_phase_unlocked: documents.implementation.next_phase_unlocked,
         deliverables: documents.implementation.deliverables,
-        pages: vec![
-            PageSnapshot {
-                id: "overview",
-                status: "IMPLEMENTED",
-            },
-            PageSnapshot {
-                id: "data-ground",
-                status: "PLANNED",
-            },
-            PageSnapshot {
-                id: "feature-studio",
-                status: "PLANNED",
-            },
-            PageSnapshot {
-                id: "strategy-studio",
-                status: "PLANNED",
-            },
-            PageSnapshot {
-                id: "model-lab",
-                status: "PLANNED",
-            },
-            PageSnapshot {
-                id: "policy-studio",
-                status: "PLANNED",
-            },
-            PageSnapshot {
-                id: "experiments",
-                status: "PLANNED",
-            },
-            PageSnapshot {
-                id: "results",
-                status: "PLANNED",
-            },
-        ],
+        accepted_phases: documents.implementation.accepted_phases,
+        pages,
     })
 }
 
@@ -411,7 +547,7 @@ mod tests {
     #[test]
     fn embedded_roadmap_phase_manifest_and_implementation_state_are_synchronized() {
         let result = validate_embedded().unwrap();
-        assert_eq!(result.current_phase, "RG-R00");
+        assert_eq!(result.current_phase, "RG-R01");
         assert_eq!(result.phase_lifecycle, Lifecycle::Active);
         assert!(!result.next_phase_unlocked);
         assert_eq!(result.pages.len(), 8);
@@ -421,7 +557,21 @@ mod tests {
                 .iter()
                 .filter(|page| page.status == "PLANNED")
                 .count(),
-            7
+            6
+        );
+        assert_eq!(
+            result
+                .pages
+                .iter()
+                .find(|page| page.id == "data-ground")
+                .unwrap()
+                .status,
+            "IN_PROGRESS"
+        );
+        assert_eq!(result.accepted_phases.len(), 1);
+        assert_eq!(
+            result.accepted_phases[0].owner_ui_status,
+            OwnerUiStatus::OwnerAcceptedWithUiReviewWaived
         );
     }
 
@@ -433,17 +583,17 @@ mod tests {
 
     #[test]
     fn phase_manifest_must_match_the_active_roadmap_phase() {
-        let changed = PHASE_SOURCE.replace("phase: RG-R00", "phase: RG-R01");
+        let changed = PHASE_SOURCE.replace("phase: RG-R01", "phase: RG-R02");
         assert!(parse_documents(ROADMAP_SOURCE, &changed, IMPLEMENTATION_SOURCE).is_err());
     }
 
     #[test]
     fn gate_evidence_and_ci_state_require_their_new_schema_versions() {
-        let old_phase_schema = PHASE_SOURCE.replacen("schema_version: 2", "schema_version: 1", 1);
+        let old_phase_schema = PHASE_SOURCE.replacen("schema_version: 3", "schema_version: 1", 1);
         assert!(parse_documents(ROADMAP_SOURCE, &old_phase_schema, IMPLEMENTATION_SOURCE).is_err());
 
         let old_implementation_schema =
-            IMPLEMENTATION_SOURCE.replacen("schema_version: 2", "schema_version: 1", 1);
+            IMPLEMENTATION_SOURCE.replacen("schema_version: 3", "schema_version: 1", 1);
         assert!(parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &old_implementation_schema).is_err());
     }
 
@@ -451,7 +601,7 @@ mod tests {
     fn implementation_deliverables_must_match_phase_manifest() {
         let changed = IMPLEMENTATION_SOURCE
             .lines()
-            .filter(|line| !line.trim_start().starts_with("desktop_shell:"))
+            .filter(|line| !line.trim_start().starts_with("data_ground_ui:"))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &changed).is_err());
@@ -461,7 +611,7 @@ mod tests {
     fn generated_document_has_a_single_active_phase_statement() {
         let mut roadmap: Roadmap = serde_yaml_ng::from_str(ROADMAP_SOURCE).unwrap();
         let generated = render_roadmap(&roadmap);
-        assert!(generated.contains("Current active phase: RG-R00"));
+        assert!(generated.contains("Current active phase: RG-R01"));
         assert!(generated.contains("RG-R08"));
         assert!(generated.ends_with('\n'));
         assert!(!generated.ends_with("\n\n"));
@@ -494,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn rg_r00_gate_set_cannot_lose_a_mandatory_gate() {
+    fn rg_r01_gate_set_cannot_lose_a_mandatory_gate() {
         let mut phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
         phase
             .acceptance_gates
@@ -504,12 +654,56 @@ mod tests {
     }
 
     #[test]
+    fn rg_r01_gate_set_rejects_unexpected_and_unsubstantiated_gates() {
+        let mut phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
+        phase.acceptance_gates.push(AcceptanceGate {
+            id: "future_gate".into(),
+            requirement: "This gate has enough text to be a real requirement.".into(),
+            evidence: "This evidence has enough text to be a real validation claim.".into(),
+        });
+        assert!(validate_acceptance_gates(&phase)
+            .unwrap_err()
+            .contains("unexpected"));
+
+        let mut phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
+        phase.acceptance_gates[0].evidence = "TODO".into();
+        assert!(validate_acceptance_gates(&phase)
+            .unwrap_err()
+            .contains("without an ID, requirement, or evidence"));
+    }
+
+    #[test]
+    fn accepted_history_requires_owner_issue_sha_and_ci_evidence() {
+        let changed = IMPLEMENTATION_SOURCE.replace(
+            "source_sha: a1f7ada003d57a26dcd4dfa41e86ba62a5890bed",
+            "source_sha: invalid",
+        );
+        let error = parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &changed).unwrap_err();
+        assert!(error.contains("incomplete or malformed"));
+    }
+
+    #[test]
+    fn a_waived_ui_review_is_recorded_as_waived_not_passed() {
+        let result = validate_embedded().unwrap();
+        let accepted = &result.accepted_phases[0];
+        assert_eq!(
+            accepted.owner_acceptance,
+            OwnerAcceptanceStatus::OwnerAccepted
+        );
+        assert_eq!(
+            accepted.owner_ui_status,
+            OwnerUiStatus::OwnerAcceptedWithUiReviewWaived
+        );
+        assert_ne!(accepted.owner_ui_status, OwnerUiStatus::OwnerAccepted);
+    }
+
+    #[test]
     fn acceptance_gate_ids_must_be_unique() {
         let mut phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
         let duplicate = phase
             .acceptance_gates
             .iter()
-            .find(|gate| gate.id == "rust_workspace")
+            .find(|gate| gate.id == "csv_ingestion")
             .unwrap()
             .clone();
         phase.acceptance_gates.push(duplicate);
@@ -530,5 +724,55 @@ mod tests {
     #[test]
     fn embedded_sources_validate_at_build_revision() {
         assert!(validate_project(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).is_ok());
+    }
+
+    #[test]
+    fn ci_workflow_is_valid_yaml_and_uses_unique_step_and_evidence_keys() {
+        let source = include_str!("../../../.github/workflows/research-ground.yml");
+        let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(source).unwrap();
+        let jobs_key = serde_yaml_ng::Value::String("jobs".into());
+        let jobs = document
+            .as_mapping()
+            .and_then(|mapping| mapping.get(&jobs_key))
+            .and_then(serde_yaml_ng::Value::as_mapping)
+            .expect("workflow declares a jobs mapping");
+        assert!(jobs.contains_key(serde_yaml_ng::Value::String("windows-foundation".into())));
+
+        let step_ids: Vec<_> = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("id: "))
+            .collect();
+        assert_eq!(
+            step_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            step_ids.len(),
+            "workflow step IDs must be unique"
+        );
+
+        let evidence_step = source
+            .split("name: Write source-bound acceptance evidence")
+            .nth(1)
+            .expect("workflow writes source-bound evidence");
+        let evidence_environment = evidence_step
+            .split("run: ./scripts/New-CiEvidence.ps1")
+            .next()
+            .expect("evidence writer has an environment block");
+        let environment_keys: Vec<_> = evidence_environment
+            .lines()
+            .filter_map(|line| {
+                let key = line.trim().split_once(':')?.0;
+                (key.starts_with("RG_STEP_") || key.starts_with("RG_GATE_")).then_some(key)
+            })
+            .collect();
+        assert_eq!(
+            environment_keys
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            environment_keys.len(),
+            "evidence environment keys must be unique"
+        );
     }
 }

@@ -1,15 +1,16 @@
 schema_version: 1
 project: MAX Research Ground
-current_phase: RG-R00
+current_phase: RG-R01
 phases:
   - id: RG-R00
     name: Rust foundation, Tauri shell, governance, CI
     objective: Create the modular Rust research core foundation and a truthful desktop shell.
-    lifecycle: ACTIVE
+    lifecycle: ACCEPTED
+    acceptance_evidence: "Owner acceptance: https://github.com/maxqstudio/max-tev-ground/issues/1; source SHA a1f7ada003d57a26dcd4dfa41e86ba62a5890bed; CI https://github.com/maxqstudio/max-tev-ground/actions/runs/39037310698. Interactive UI review explicitly waived, not tested."
   - id: RG-R01
     name: Data Ground
     objective: Add historical ingestion, dataset integrity, lineage, and data quality audit.
-    lifecycle: PLANNED
+    lifecycle: ACTIVE
   - id: RG-R02
     name: Feature Studio
     objective: Add a versioned indicator registry and anti-lookahead feature engine.

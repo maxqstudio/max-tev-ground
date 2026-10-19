@@ -1,12 +1,14 @@
 # MAX Research Ground roadmap
 
-Generated from ROADMAP.yaml. Current active phase: RG-R00. Later phases stay locked until the Owner accepts the current checkpoint and authorizes progression.
+Generated from ROADMAP.yaml. Current active phase: RG-R01. Later phases stay locked until the Owner accepts the current checkpoint and authorizes progression.
 
-## RG-R00 — Rust foundation, Tauri shell, governance, CI (ACTIVE)
+## RG-R00 — Rust foundation, Tauri shell, governance, CI (ACCEPTED)
 
 Create the modular Rust research core foundation and a truthful desktop shell.
 
-## RG-R01 — Data Ground (PLANNED)
+Acceptance evidence: Owner acceptance: https://github.com/maxqstudio/max-tev-ground/issues/1; source SHA a1f7ada003d57a26dcd4dfa41e86ba62a5890bed; CI https://github.com/maxqstudio/max-tev-ground/actions/runs/39037310698. Interactive UI review explicitly waived, not tested.
+
+## RG-R01 — Data Ground (ACTIVE)
 
 Add historical ingestion, dataset integrity, lineage, and data quality audit.
 

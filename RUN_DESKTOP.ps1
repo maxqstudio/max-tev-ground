@@ -28,31 +28,6 @@ function Get-SourceFingerprint {
     finally { $sha.Dispose() }
 }
 
-function Find-AcceptedExecutable([string]$Commit) {
-    $acceptanceRoot = Join-Path $Root "artifacts\acceptance"
-    if (-not (Test-Path -LiteralPath $acceptanceRoot -PathType Container)) { return $null }
-
-    foreach ($directory in (Get-ChildItem -LiteralPath $acceptanceRoot -Directory | Sort-Object LastWriteTimeUtc -Descending)) {
-        $reportPath = Join-Path $directory.FullName "acceptance.json"
-        if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) { continue }
-        try { $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json }
-        catch { continue }
-
-        $tauriGate = @($report.gates | Where-Object { $_.name -eq "Tauri desktop build without packaging" -and $_.status -eq "PASS" })
-        if ($report.phase -ne "RG-R00" -or
-            $report.automated_status -ne "AUTOMATED_PASS" -or
-            $report.source.commit_sha -ne $Commit -or
-            $report.source.clean -ne $true -or
-            $tauriGate.Count -ne 1) { continue }
-
-        $exe = Join-Path $directory.FullName "tauri-target\release\max-research-ground-desktop.exe"
-        if (Test-Path -LiteralPath $exe -PathType Leaf) {
-            return [pscustomobject]@{ Path = $exe; Report = $reportPath; Commit = $Commit }
-        }
-    }
-    return $null
-}
-
 function Import-MsvcEnvironment {
     $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
     if ([string]::IsNullOrWhiteSpace($programFilesX86)) { throw "The Windows x64 MSVC build environment is unavailable." }
@@ -82,6 +57,7 @@ function Import-MsvcEnvironment {
 try {
     if ($Root -ne $ExpectedRoot) { throw "Desktop runner is bound to $ExpectedRoot; found $Root." }
     Set-Location -LiteralPath $Root
+    . (Join-Path $Root "scripts\Desktop-LauncherFunctions.ps1")
 
     $head = (& git -C $Root rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $head -notmatch '^[0-9a-f]{40,64}$') { throw "Could not resolve the current Git commit." }
@@ -109,7 +85,7 @@ try {
     $status = @(& git -C $Root status --porcelain --untracked-files=normal)
     if ($LASTEXITCODE -ne 0) { throw "Could not inspect the source worktree status." }
     if ($status.Count -eq 0) {
-        $accepted = Find-AcceptedExecutable -Commit $head
+        $accepted = Find-AcceptedExecutable -AcceptanceRoot (Join-Path $Root "artifacts\acceptance") -Commit $head -Tree $tree
         if ($accepted) { $exe = $accepted.Path }
     }
 
@@ -171,8 +147,7 @@ try {
             $RunnerLog = Join-Path $runnerRoot $logName
             if (-not (Test-Path -LiteralPath (Join-Path $Root "node_modules\@tauri-apps\cli"))) {
                 Write-Host "Installing the pinned frontend dependencies with npm ci."
-                & $npm.Source ci --no-audit --no-fund 2>&1 | Tee-Object -FilePath $RunnerLog
-                $npmExit = $LASTEXITCODE
+                $npmExit = Invoke-LoggedNativeCommand -LogPath $RunnerLog -Command { & $npm.Source ci --no-audit --no-fund 2>&1 }
                 if ($npmExit -ne 0) { throw "npm ci failed with exit code $npmExit. Build log: $RunnerLog" }
             }
 
@@ -180,8 +155,7 @@ try {
             try {
                 $env:CARGO_TARGET_DIR = $targetRoot
                 Write-Host "Building the desktop app. Build output is also recorded at $RunnerLog."
-                & $npm.Source run tauri -- build --no-bundle 2>&1 | Tee-Object -FilePath $RunnerLog -Append
-                $buildExit = $LASTEXITCODE
+                $buildExit = Invoke-LoggedNativeCommand -LogPath $RunnerLog -Command { & $npm.Source run tauri -- build --no-bundle 2>&1 }
             } finally {
                 if ($null -eq $previousCargoTarget) { Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
                 else { $env:CARGO_TARGET_DIR = $previousCargoTarget }

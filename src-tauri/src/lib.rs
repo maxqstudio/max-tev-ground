@@ -1,3 +1,7 @@
+mod data_ground_commands;
+
+use tauri::Manager;
+
 mod commands {
     use rg_governance::GovernanceSnapshot;
 
@@ -8,11 +12,31 @@ mod commands {
 }
 
 fn register_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
-    builder.invoke_handler(tauri::generate_handler![commands::get_foundation_status])
+    builder.invoke_handler(tauri::generate_handler![
+        commands::get_foundation_status,
+        data_ground_commands::select_data_source,
+        data_ground_commands::inspect_selected_source,
+        data_ground_commands::preview_data_import,
+        data_ground_commands::get_active_data_import,
+        data_ground_commands::confirm_data_import,
+        data_ground_commands::cancel_data_import,
+        data_ground_commands::start_dataset_catalog_verification,
+        data_ground_commands::get_dataset_catalog_progress,
+        data_ground_commands::cancel_dataset_catalog_verification,
+        data_ground_commands::list_datasets,
+        data_ground_commands::inspect_dataset,
+        data_ground_commands::list_import_attempts
+    ])
 }
 
 pub fn run() {
     register_commands(tauri::Builder::default())
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let data_directory = app.path().app_data_dir()?;
+            app.manage(data_ground_commands::DataGroundState::open(data_directory)?);
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("failed to run MAX Research Ground desktop shell");
 }
@@ -50,19 +74,24 @@ mod tests {
         .deserialize::<serde_json::Value>()
         .expect("command response should be JSON");
 
-        assert_eq!(response["current_phase"], "RG-R00");
+        assert_eq!(response["current_phase"], "RG-R01");
         assert_eq!(response["phase_lifecycle"], "ACTIVE");
         assert_eq!(response["pages"].as_array().unwrap().len(), 8);
+        assert_eq!(
+            response["accepted_phases"][0]["owner_ui_status"],
+            "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED"
+        );
+        assert_eq!(response["pages"][1]["status"], "IN_PROGRESS");
         assert!(!response["next_phase_unlocked"].as_bool().unwrap());
     }
 
     #[test]
     fn direct_command_boundary_never_claims_owner_acceptance() {
         let response = commands::get_foundation_status().unwrap();
-        assert_eq!(response.current_phase, "RG-R00");
+        assert_eq!(response.current_phase, "RG-R01");
         assert_eq!(
             response.owner_acceptance,
-            rg_governance::OwnerUiStatus::Pending
+            rg_governance::OwnerAcceptanceStatus::Pending
         );
         assert!(!response.next_phase_unlocked);
     }
