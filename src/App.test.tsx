@@ -137,7 +137,8 @@ describe("desktop shell navigation", () => {
     expect(await screen.findByRole("heading", { name: "Feature Studio implementation has not started" })).toBeTruthy();
     expect(screen.getByText("ACTIVE NOT STARTED")).toBeTruthy();
     expect(screen.getByText(/implementation handoff is pending/)).toBeTruthy();
-    expect(screen.getByText(/Desktop UI and CSV import review were waived, NOT TESTED/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Overview/ }));
+    expect(await screen.findByText(/Desktop UI and CSV import review were waived, NOT TESTED/)).toBeTruthy();
     expect(screen.getByText(/Known UX debt \(unresolved\)/)).toBeTruthy();
   });
 
