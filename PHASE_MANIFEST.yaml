@@ -20,7 +20,7 @@ acceptance_gates:
   - id: causal_availability
     requirement: Feature rows use only bars available by their explicit UTC decision boundary and never backfill warmup or future values.
     evidence: Boundary tests cover closed-bar inclusion, open and close timestamps, late data, null warmup, finite output, and causal rolling windows.
-  - id: multi_market_timeframe
+  - id: multi_symbol_timeframe_join
     requirement: Reference series use deterministic as-of joins with explicit staleness limits and never expose unfinished higher-timeframe bars.
     evidence: Multi-series tests cover equal timestamps, suffix symbols, missing series, stale references, market calendars, and incomplete H4 bars.
   - id: feature_materialization

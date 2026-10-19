@@ -35,7 +35,7 @@ const REQUIRED_RG_R02_GATES: [&str; 13] = [
     "input_authority",
     "indicator_registry",
     "causal_availability",
-    "multi_market_timeframe",
+    "multi_symbol_timeframe_join",
     "feature_materialization",
     "resource_controls",
     "feature_studio_ui",
