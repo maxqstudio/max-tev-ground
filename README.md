@@ -1,6 +1,6 @@
 # MAX Research Ground
 
-Rust-first, local-first foundation for reproducible trading research. **RG-R01 Data Ground and RG-R02 Feature Studio are Owner accepted with manual UI review waived, not tested. RG-R03 Deterministic Strategy Engine is the active scope, but its implementation has not started.** RG-R04–RG-R08 remain planned. This repository does not establish that a trading edge exists and does not execute trades.
+Rust-first, local-first foundation for reproducible trading research. **RG-R01 Data Ground and RG-R02 Feature Studio are Owner accepted with manual UI review waived, not tested. RG-R03 Deterministic Strategy Engine is implemented on `work/rg-r03-strategy-engine` and awaits Control Room audit; Owner UI review and acceptance are pending.** RG-R04–RG-R08 remain planned. This repository does not establish that a trading edge exists and does not execute trades.
 
 ## Build and acceptance
 
@@ -11,7 +11,7 @@ Requirements: Node.js 24.19.0, npm 11.17.0, Rust 1.99.1, Windows C++ Build Tools
 .\RUN_ACCEPTANCE.ps1
 ```
 
-`RUN_ACCEPTANCE.ps1` is the RG-R03 acceptance runner. It requires a clean commit on `work/rg-r03-strategy-engine` or on the governance-only branch `work/rg-r02-closure-rg-r03-activation`. Besides the workspace, frontend, and Tauri checks, it runs `scripts/Invoke-PhaseGateTests.ps1`, which executes the tests named after each `PHASE_MANIFEST.yaml` gate and fails any gate with zero matching tests. GitHub CI runs the same gate step, so a gate passes only on its own tests, never on a generic suite result. While `IMPLEMENTATION_STATE.yaml` records `builder_status: NOT_STARTED`, the step runs no gate tests and every RG-R03 gate is reported `NOT_RUN`, so the automated status stays `NOT_RUN`.
+`RUN_ACCEPTANCE.ps1` is the RG-R03 acceptance runner. It requires a clean commit on `work/rg-r03-strategy-engine` or on the governance-only branch `work/rg-r02-closure-rg-r03-activation`. Besides the workspace, frontend, and Tauri checks, it runs `scripts/Invoke-PhaseGateTests.ps1`, which executes the tests named after each `PHASE_MANIFEST.yaml` gate and fails any gate with zero matching tests. GitHub CI runs the same gate step, so a gate passes only on its own tests, never on a generic suite result. (While a phase records `builder_status: NOT_STARTED`, the step runs no gate tests and reports every gate `NOT_RUN`.)
 
 ## Open the desktop app
 
@@ -39,10 +39,18 @@ The Feature Studio page selects verified inputs, configures registry indicators 
 
 Owner acceptance of RG-R02 is bound to `main` merge `59e0f2e7bd5a875b661bb608d289b3b21b595bd2`, tree `326b01e72b915746be2134d00a2d0d1fa737d853` (identical to accepted candidate `235bfe045abb9f3740611c3bf87114eb55973722`), and exact-main CI [run #39405958946](https://github.com/maxqstudio/max-tev-ground/actions/runs/39405958946). The native desktop build, launch, restart, and the IPC workflow were evidenced, but manual desktop click-through was **NOT_RUN; UI review waived, not tested**. The Owner's visual redesign request is deferred UX debt, not accepted.
 
-## RG-R03 Deterministic Strategy Engine (active, not started)
+## RG-R03 Deterministic Strategy Engine (implemented, pending audit)
 
-RG-R03 is authorized ([Issue #7](https://github.com/maxqstudio/max-tev-ground/issues/7)), but no strategy code exists yet. Its acceptance gates are frozen in `PHASE_MANIFEST.yaml` before implementation, and all of them remain `NOT_RUN`. The Strategy Studio page states that implementation has not started. RG-R03 will emit `BUY`, `SELL`, or `SKIP` research decisions from verified RG-R02 feature sets; it will not place orders, connect to MT5, compute PnL, or claim an edge.
+The `rg-strategy-engine` crate ([Issue #7](https://github.com/maxqstudio/max-tev-ground/issues/7)) turns one registered, `READY` RG-R02 feature set into one `BUY`, `SELL`, or `SKIP` research decision per closed bar of that feature set's target series. Two native, versioned rules exist:
+- `THRESHOLD_BAND` compares one target feature with strict upper and lower thresholds.
+- `TREND_CONTEXT` compares fast and slow target features, filtered by a declared reference-market context feature.
 
-Synthetic repository fixtures are parser and deterministic test inputs only; they are not market evidence or proof of trading performance. Historical data remains on the user's machine; the importer does not upload market data. An importer for the legacy research store is deferred. The MT5 bridge is not implemented; neither RG-R01 nor RG-R02 opens a terminal, reads MT5 `Common\Files`, or accesses account/order APIs. Feature sets are research inputs, not trading signals or evidence of edge. No live trading or automatic Champion promotion is part of any phase so far.
+Neither rule names a symbol, suffix, or timeframe. Roles must be bound to features of the required source, and context markets can only filter target decisions; they never create decision rows.
+
+The engine evaluates a private, digest-verified copy of the feature output and recomputes the RG-R02 row fingerprint while deciding. It reads each row's own causal values only; it never recomputes a feature or reads another row. Unavailable or conflicting inputs produce `SKIP` with a reason code and the responsible role. Decisions are staged, confirmed explicitly, journaled, and promoted atomically. Every read re-verifies the decision set, its feature set, and the source datasets, so upstream tampering revokes `READY`.
+
+The Strategy Studio page selects a feature set, a strategy, role bindings, and parameters, then previews and confirms decisions and inspects lineage. Only headless component and IPC tests have run, so **the desktop UI has not been manually tested.** All tests use labeled synthetic fixtures.
+
+Synthetic repository fixtures are parser and deterministic test inputs only; they are not market evidence or proof of trading performance. Historical data remains on the user's machine; the importer does not upload market data. An importer for the legacy research store is deferred. The MT5 bridge is not implemented. No phase opens a terminal, reads MT5 `Common\Files`, or accesses account or order APIs. Feature sets and decision sets are research records, not trading signals, orders, backtests, or evidence of edge. No live trading or automatic Champion promotion is part of any phase so far.
 
 See [CONTRACTS.md](CONTRACTS.md), [SECURITY.md](SECURITY.md), [ACCEPTANCE.md](ACCEPTANCE.md), and generated [ROADMAP.md](ROADMAP.md).

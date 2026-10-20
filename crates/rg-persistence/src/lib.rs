@@ -5,7 +5,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Error)]
 pub enum PersistenceError {
@@ -33,6 +33,10 @@ pub enum PersistenceError {
     FeatureSetAlreadyExists(String),
     #[error("feature set metadata is invalid: {0}")]
     InvalidFeatureSetMetadata(String),
+    #[error("decision set ID or identity already exists: {0}")]
+    DecisionSetAlreadyExists(String),
+    #[error("decision set metadata is invalid: {0}")]
+    InvalidDecisionSetMetadata(String),
 }
 
 #[derive(Clone, Copy)]
@@ -259,6 +263,69 @@ const MIGRATIONS: &[Migration] = &[
         BEFORE DELETE ON feature_attempts
         BEGIN
             SELECT RAISE(ABORT, 'feature attempt records are immutable');
+        END;
+    ",
+    },
+    Migration {
+        version: 7,
+        name: "immutable_decision_set_registry",
+        sql: "
+        CREATE TABLE decision_sets (
+            decision_set_id TEXT PRIMARY KEY NOT NULL,
+            identity_sha256 TEXT NOT NULL UNIQUE CHECK (length(identity_sha256) = 64),
+            feature_set_id TEXT NOT NULL REFERENCES feature_sets(feature_set_id),
+            feature_set_manifest_sha256 TEXT NOT NULL CHECK (length(feature_set_manifest_sha256) = 64),
+            manifest_json TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+            output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+            created_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status = 'READY')
+        );
+        CREATE TRIGGER decision_sets_prevent_update
+        BEFORE UPDATE ON decision_sets
+        BEGIN
+            SELECT RAISE(ABORT, 'decision set metadata is immutable');
+        END;
+        CREATE TRIGGER decision_sets_prevent_delete
+        BEFORE DELETE ON decision_sets
+        BEGIN
+            SELECT RAISE(ABORT, 'decision set metadata is immutable');
+        END;
+        CREATE TABLE decision_set_promotions (
+            decision_set_id TEXT PRIMARY KEY NOT NULL,
+            staging_name TEXT NOT NULL,
+            identity_sha256 TEXT NOT NULL CHECK (length(identity_sha256) = 64),
+            feature_set_id TEXT NOT NULL,
+            feature_set_manifest_sha256 TEXT NOT NULL CHECK (length(feature_set_manifest_sha256) = 64),
+            manifest_json TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+            output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+            created_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status = 'READY'),
+            attempt_id TEXT NOT NULL UNIQUE,
+            attempt_started_at_utc TEXT NOT NULL,
+            attempt_completed_at_utc TEXT NOT NULL
+        );
+        CREATE TABLE decision_attempts (
+            attempt_id TEXT PRIMARY KEY NOT NULL,
+            started_at_utc TEXT NOT NULL,
+            completed_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('MATERIALIZED', 'REUSED', 'FAILED', 'CANCELLED')),
+            decision_set_id TEXT,
+            diagnostic_code TEXT,
+            diagnostic_message TEXT
+        );
+        CREATE INDEX decision_attempts_completed_idx
+            ON decision_attempts(completed_at_utc DESC, attempt_id);
+        CREATE TRIGGER decision_attempts_prevent_update
+        BEFORE UPDATE ON decision_attempts
+        BEGIN
+            SELECT RAISE(ABORT, 'decision attempt records are immutable');
+        END;
+        CREATE TRIGGER decision_attempts_prevent_delete
+        BEFORE DELETE ON decision_attempts
+        BEGIN
+            SELECT RAISE(ABORT, 'decision attempt records are immutable');
         END;
     ",
     },
@@ -1291,6 +1358,355 @@ pub fn list_feature_set_inputs(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecisionSetMetadata {
+    pub decision_set_id: String,
+    pub identity_sha256: String,
+    pub feature_set_id: String,
+    pub feature_set_manifest_sha256: String,
+    pub manifest_json: String,
+    pub manifest_sha256: String,
+    pub output_sha256: String,
+    pub created_at_utc: String,
+    pub status: String,
+    pub manifest_integrity_valid: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DecisionAttemptRecord {
+    pub attempt_id: String,
+    pub started_at_utc: String,
+    pub completed_at_utc: String,
+    pub status: String,
+    pub decision_set_id: Option<String>,
+    pub diagnostic_code: Option<String>,
+    pub diagnostic_message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingDecisionSetPromotion {
+    pub staging_name: String,
+    pub decision_set: DecisionSetMetadata,
+    pub attempt: DecisionAttemptRecord,
+}
+
+fn validate_decision_set_metadata(
+    decision_set: &DecisionSetMetadata,
+) -> Result<(), PersistenceError> {
+    let valid_sha =
+        |value: &str| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let valid_feature_set = decision_set
+        .feature_set_id
+        .strip_prefix("fs_")
+        .is_some_and(valid_sha);
+    if !valid_sha(&decision_set.identity_sha256)
+        || decision_set.decision_set_id != format!("dc_{}", decision_set.identity_sha256)
+        || !valid_feature_set
+        || !valid_sha(&decision_set.feature_set_manifest_sha256)
+        || !valid_sha(&decision_set.manifest_sha256)
+        || !valid_sha(&decision_set.output_sha256)
+        || decision_set.created_at_utc.trim().is_empty()
+        || decision_set.status != "READY"
+    {
+        return Err(PersistenceError::InvalidDecisionSetMetadata(
+            "identifier, feature-set lineage, digest, timestamp, or status is invalid".into(),
+        ));
+    }
+    let actual = rg_contracts::Sha256Digest::of_bytes(decision_set.manifest_json.as_bytes());
+    if decision_set.manifest_sha256 != actual.as_str() {
+        return Err(PersistenceError::InvalidDecisionSetMetadata(
+            "manifest SHA-256 does not match manifest bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_decision_attempt(
+    attempt: &DecisionAttemptRecord,
+    allowed: &[&str],
+) -> Result<(), PersistenceError> {
+    if attempt.attempt_id.trim().is_empty()
+        || attempt.started_at_utc.trim().is_empty()
+        || attempt.completed_at_utc.trim().is_empty()
+        || !allowed.contains(&attempt.status.as_str())
+    {
+        return Err(PersistenceError::InvalidDecisionSetMetadata(
+            "decision attempt metadata is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn save_pending_decision_set_promotion(
+    connection: &Connection,
+    pending: &PendingDecisionSetPromotion,
+) -> Result<(), PersistenceError> {
+    validate_decision_set_metadata(&pending.decision_set)?;
+    validate_decision_attempt(&pending.attempt, &["MATERIALIZED"])?;
+    validate_staging_name(&pending.staging_name)?;
+    let decision_set = &pending.decision_set;
+    connection.execute(
+        "INSERT INTO decision_set_promotions (
+            decision_set_id, staging_name, identity_sha256, feature_set_id,
+            feature_set_manifest_sha256, manifest_json, manifest_sha256, output_sha256,
+            created_at_utc, status, attempt_id, attempt_started_at_utc, attempt_completed_at_utc
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        rusqlite::params![
+            decision_set.decision_set_id,
+            pending.staging_name,
+            decision_set.identity_sha256,
+            decision_set.feature_set_id,
+            decision_set.feature_set_manifest_sha256,
+            decision_set.manifest_json,
+            decision_set.manifest_sha256,
+            decision_set.output_sha256,
+            decision_set.created_at_utc,
+            decision_set.status,
+            pending.attempt.attempt_id,
+            pending.attempt.started_at_utc,
+            pending.attempt.completed_at_utc,
+        ],
+    )?;
+    Ok(())
+}
+
+const PENDING_DECISION_COLUMNS: &str =
+    "decision_set_id, staging_name, identity_sha256, feature_set_id, feature_set_manifest_sha256,
+     manifest_json, manifest_sha256, output_sha256, created_at_utc, status, attempt_id,
+     attempt_started_at_utc, attempt_completed_at_utc";
+
+fn pending_decision_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<PendingDecisionSetPromotion, rusqlite::Error> {
+    let manifest_json: String = row.get(5)?;
+    let manifest_sha256: String = row.get(6)?;
+    let actual = rg_contracts::Sha256Digest::of_bytes(manifest_json.as_bytes());
+    let decision_set_id: String = row.get(0)?;
+    Ok(PendingDecisionSetPromotion {
+        staging_name: row.get(1)?,
+        decision_set: DecisionSetMetadata {
+            decision_set_id: decision_set_id.clone(),
+            identity_sha256: row.get(2)?,
+            feature_set_id: row.get(3)?,
+            feature_set_manifest_sha256: row.get(4)?,
+            manifest_integrity_valid: manifest_sha256 == actual.as_str(),
+            manifest_json,
+            manifest_sha256,
+            output_sha256: row.get(7)?,
+            created_at_utc: row.get(8)?,
+            status: row.get(9)?,
+        },
+        attempt: DecisionAttemptRecord {
+            attempt_id: row.get(10)?,
+            started_at_utc: row.get(11)?,
+            completed_at_utc: row.get(12)?,
+            status: "MATERIALIZED".into(),
+            decision_set_id: Some(decision_set_id),
+            diagnostic_code: None,
+            diagnostic_message: None,
+        },
+    })
+}
+
+fn decode_pending_decision(
+    pending: PendingDecisionSetPromotion,
+) -> Result<PendingDecisionSetPromotion, PersistenceError> {
+    validate_decision_set_metadata(&pending.decision_set)?;
+    validate_staging_name(&pending.staging_name)?;
+    Ok(pending)
+}
+
+pub fn list_pending_decision_set_promotions(
+    connection: &Connection,
+) -> Result<Vec<PendingDecisionSetPromotion>, PersistenceError> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {PENDING_DECISION_COLUMNS} FROM decision_set_promotions ORDER BY decision_set_id"
+    ))?;
+    let rows = statement.query_map([], pending_decision_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(decode_pending_decision)
+        .collect()
+}
+
+pub fn clear_pending_decision_set_promotion(
+    connection: &Connection,
+    decision_set_id: &str,
+) -> Result<bool, PersistenceError> {
+    Ok(connection.execute(
+        "DELETE FROM decision_set_promotions WHERE decision_set_id = ?1",
+        [decision_set_id],
+    )? == 1)
+}
+
+/// Registers the journaled decision set and its terminal attempt in one transaction, then removes
+/// the journal entry. A failure, such as lineage to an unregistered feature set, leaves the
+/// journal for recovery.
+pub fn complete_pending_decision_set_promotion(
+    connection: &mut Connection,
+    decision_set_id: &str,
+) -> Result<(), PersistenceError> {
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let pending = {
+        let mut statement = tx.prepare(&format!(
+            "SELECT {PENDING_DECISION_COLUMNS} FROM decision_set_promotions WHERE decision_set_id = ?1"
+        ))?;
+        let mut rows = statement.query([decision_set_id])?;
+        rows.next()?.map(pending_decision_from_row).transpose()?
+    }
+    .ok_or_else(|| {
+        PersistenceError::InvalidDecisionSetMetadata(format!(
+            "pending promotion is missing for decision set {decision_set_id}"
+        ))
+    })
+    .and_then(decode_pending_decision)?;
+    let decision_set = &pending.decision_set;
+    let inserted = tx.execute(
+        "INSERT INTO decision_sets (
+            decision_set_id, identity_sha256, feature_set_id, feature_set_manifest_sha256,
+            manifest_json, manifest_sha256, output_sha256, created_at_utc, status
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            decision_set.decision_set_id,
+            decision_set.identity_sha256,
+            decision_set.feature_set_id,
+            decision_set.feature_set_manifest_sha256,
+            decision_set.manifest_json,
+            decision_set.manifest_sha256,
+            decision_set.output_sha256,
+            decision_set.created_at_utc,
+            decision_set.status,
+        ],
+    );
+    match inserted {
+        Ok(_) => {}
+        Err(error)
+            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
+                && get_feature_set_metadata(&tx, &decision_set.feature_set_id)?.is_some() =>
+        {
+            return Err(PersistenceError::DecisionSetAlreadyExists(
+                decision_set.decision_set_id.clone(),
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    insert_decision_attempt(&tx, &pending.attempt)?;
+    tx.execute(
+        "DELETE FROM decision_set_promotions WHERE decision_set_id = ?1",
+        [decision_set_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn insert_decision_attempt(
+    connection: &Connection,
+    attempt: &DecisionAttemptRecord,
+) -> Result<(), PersistenceError> {
+    connection.execute(
+        "INSERT INTO decision_attempts (
+            attempt_id, started_at_utc, completed_at_utc, status, decision_set_id,
+            diagnostic_code, diagnostic_message
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            attempt.attempt_id,
+            attempt.started_at_utc,
+            attempt.completed_at_utc,
+            attempt.status,
+            attempt.decision_set_id,
+            attempt.diagnostic_code,
+            attempt.diagnostic_message
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn save_decision_attempt(
+    connection: &Connection,
+    attempt: &DecisionAttemptRecord,
+) -> Result<(), PersistenceError> {
+    validate_decision_attempt(attempt, &["REUSED", "FAILED", "CANCELLED"])?;
+    insert_decision_attempt(connection, attempt)
+}
+
+pub fn list_decision_attempts(
+    connection: &Connection,
+    limit: u64,
+) -> Result<Vec<DecisionAttemptRecord>, PersistenceError> {
+    let limit = i64::try_from(limit).map_err(|_| {
+        PersistenceError::InvalidDecisionSetMetadata("attempt page size is too large".into())
+    })?;
+    let mut statement = connection.prepare(
+        "SELECT attempt_id, started_at_utc, completed_at_utc, status, decision_set_id,
+                diagnostic_code, diagnostic_message
+         FROM decision_attempts ORDER BY completed_at_utc DESC, attempt_id LIMIT ?1",
+    )?;
+    let rows = statement.query_map([limit], |row| {
+        Ok(DecisionAttemptRecord {
+            attempt_id: row.get(0)?,
+            started_at_utc: row.get(1)?,
+            completed_at_utc: row.get(2)?,
+            status: row.get(3)?,
+            decision_set_id: row.get(4)?,
+            diagnostic_code: row.get(5)?,
+            diagnostic_message: row.get(6)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn decision_set_from_row(row: &rusqlite::Row<'_>) -> Result<DecisionSetMetadata, rusqlite::Error> {
+    let manifest_json: String = row.get(4)?;
+    let manifest_sha256: String = row.get(5)?;
+    let actual = rg_contracts::Sha256Digest::of_bytes(manifest_json.as_bytes());
+    Ok(DecisionSetMetadata {
+        decision_set_id: row.get(0)?,
+        identity_sha256: row.get(1)?,
+        feature_set_id: row.get(2)?,
+        feature_set_manifest_sha256: row.get(3)?,
+        manifest_integrity_valid: manifest_sha256 == actual.as_str(),
+        manifest_json,
+        manifest_sha256,
+        output_sha256: row.get(6)?,
+        created_at_utc: row.get(7)?,
+        status: row.get(8)?,
+    })
+}
+
+const DECISION_SET_COLUMNS: &str = "decision_set_id, identity_sha256, feature_set_id,
+     feature_set_manifest_sha256, manifest_json, manifest_sha256, output_sha256, created_at_utc,
+     status";
+
+pub fn get_decision_set_metadata(
+    connection: &Connection,
+    decision_set_id: &str,
+) -> Result<Option<DecisionSetMetadata>, PersistenceError> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {DECISION_SET_COLUMNS} FROM decision_sets WHERE decision_set_id = ?1"
+    ))?;
+    let mut rows = statement.query([decision_set_id])?;
+    Ok(rows.next()?.map(decision_set_from_row).transpose()?)
+}
+
+pub fn list_decision_set_metadata_after(
+    connection: &Connection,
+    after_decision_set_id: &str,
+    limit: u64,
+) -> Result<Vec<DecisionSetMetadata>, PersistenceError> {
+    let limit = i64::try_from(limit).map_err(|_| {
+        PersistenceError::InvalidDecisionSetMetadata("decision set page size is too large".into())
+    })?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT {DECISION_SET_COLUMNS} FROM decision_sets
+         WHERE decision_set_id > ?1 ORDER BY decision_set_id LIMIT ?2"
+    ))?;
+    let rows = statement.query_map(
+        rusqlite::params![after_decision_set_id, limit],
+        decision_set_from_row,
+    )?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 fn checksum(value: &str) -> String {
     rg_contracts::Sha256Digest::of_bytes(value.as_bytes())
         .as_str()
@@ -2049,5 +2465,186 @@ mod tests {
             })
             .unwrap();
         assert_eq!(applied, CURRENT_SCHEMA_VERSION);
+    }
+
+    /// Registers a READY feature set so decision lineage foreign keys have a real parent row.
+    fn registered_feature_set(connection: &mut Connection) -> FeatureSetMetadata {
+        let input = registered_lineage_dataset(connection, 'a');
+        let pending = pending_feature_set(vec![input]);
+        save_pending_feature_set_promotion(connection, &pending).unwrap();
+        complete_pending_feature_set_promotion(connection, &pending.feature_set.feature_set_id)
+            .unwrap();
+        pending.feature_set
+    }
+
+    fn pending_decision_set(feature_set_id: &str) -> PendingDecisionSetPromotion {
+        let identity = "d".repeat(64);
+        let manifest_json = "{\"decision_fixture\":true}".to_owned();
+        PendingDecisionSetPromotion {
+            staging_name: "018f4c4f-7d9b-7b9f-a70e-92bb7cf04c63".into(),
+            decision_set: DecisionSetMetadata {
+                decision_set_id: format!("dc_{identity}"),
+                identity_sha256: identity,
+                feature_set_id: feature_set_id.into(),
+                feature_set_manifest_sha256: "a".repeat(64),
+                manifest_sha256: checksum(&manifest_json),
+                manifest_json,
+                output_sha256: "e".repeat(64),
+                created_at_utc: "2026-10-20T00:00:02Z".into(),
+                status: "READY".into(),
+                manifest_integrity_valid: true,
+            },
+            attempt: DecisionAttemptRecord {
+                attempt_id: "decision-attempt-fixture".into(),
+                started_at_utc: "2026-10-20T00:00:01Z".into(),
+                completed_at_utc: "2026-10-20T00:00:02Z".into(),
+                status: "MATERIALIZED".into(),
+                decision_set_id: None,
+                diagnostic_code: None,
+                diagnostic_message: None,
+            },
+        }
+    }
+
+    #[test]
+    fn gate_immutable_decision_materialization_journal_registers_set_and_attempt_atomically() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate(&mut connection).unwrap();
+        let feature_set = registered_feature_set(&mut connection);
+        let pending = pending_decision_set(&feature_set.feature_set_id);
+        let id = pending.decision_set.decision_set_id.clone();
+        save_pending_decision_set_promotion(&connection, &pending).unwrap();
+        assert_eq!(
+            list_pending_decision_set_promotions(&connection).unwrap(),
+            vec![PendingDecisionSetPromotion {
+                attempt: DecisionAttemptRecord {
+                    decision_set_id: Some(id.clone()),
+                    ..pending.attempt.clone()
+                },
+                ..pending.clone()
+            }]
+        );
+        assert!(get_decision_set_metadata(&connection, &id)
+            .unwrap()
+            .is_none());
+
+        complete_pending_decision_set_promotion(&mut connection, &id).unwrap();
+        assert!(list_pending_decision_set_promotions(&connection)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            get_decision_set_metadata(&connection, &id).unwrap(),
+            Some(pending.decision_set.clone())
+        );
+        assert_eq!(
+            list_decision_set_metadata_after(&connection, "", 10).unwrap(),
+            vec![pending.decision_set.clone()]
+        );
+        let attempts = list_decision_attempts(&connection, 10).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status, "MATERIALIZED");
+        assert_eq!(attempts[0].decision_set_id.as_deref(), Some(id.as_str()));
+
+        save_pending_decision_set_promotion(&connection, &pending).unwrap();
+        assert!(matches!(
+            complete_pending_decision_set_promotion(&mut connection, &id),
+            Err(PersistenceError::DecisionSetAlreadyExists(_))
+        ));
+    }
+
+    #[test]
+    fn gate_adversarial_tamper_decision_registry_rows_are_immutable_and_tamper_evident() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate(&mut connection).unwrap();
+        let feature_set = registered_feature_set(&mut connection);
+        let pending = pending_decision_set(&feature_set.feature_set_id);
+        let id = pending.decision_set.decision_set_id.clone();
+        save_pending_decision_set_promotion(&connection, &pending).unwrap();
+        complete_pending_decision_set_promotion(&mut connection, &id).unwrap();
+
+        for statement in [
+            "UPDATE decision_sets SET status = 'READY'",
+            "DELETE FROM decision_sets",
+            "UPDATE decision_attempts SET status = 'FAILED'",
+            "DELETE FROM decision_attempts",
+        ] {
+            assert!(connection.execute(statement, []).is_err(), "{statement}");
+        }
+        connection
+            .execute_batch(
+                "DROP TRIGGER decision_sets_prevent_update;
+                 UPDATE decision_sets SET manifest_json = manifest_json || ' ';",
+            )
+            .unwrap();
+        assert!(
+            !get_decision_set_metadata(&connection, &id)
+                .unwrap()
+                .unwrap()
+                .manifest_integrity_valid
+        );
+    }
+
+    #[test]
+    fn gate_strategy_input_authority_decision_journal_rejects_inconsistent_identity_and_lineage() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate(&mut connection).unwrap();
+        let feature_set = registered_feature_set(&mut connection);
+        let mut wrong_id = pending_decision_set(&feature_set.feature_set_id);
+        wrong_id.decision_set.decision_set_id = format!("dc_{}", "0".repeat(64));
+        let mut wrong_manifest = pending_decision_set(&feature_set.feature_set_id);
+        wrong_manifest.decision_set.manifest_json.push(' ');
+        let mut path_lineage = pending_decision_set(&feature_set.feature_set_id);
+        path_lineage.decision_set.feature_set_id = "C:/MT5/Common/Files/EURUSD.csv".into();
+        let mut blocked = pending_decision_set(&feature_set.feature_set_id);
+        blocked.decision_set.status = "QUARANTINED".into();
+        for candidate in [&wrong_id, &wrong_manifest, &path_lineage, &blocked] {
+            assert!(save_pending_decision_set_promotion(&connection, candidate).is_err());
+        }
+
+        // Lineage to a feature set that was never registered fails the foreign key, rolls back,
+        // and leaves the journal for fail-closed recovery.
+        let unregistered = pending_decision_set(&format!("fs_{}", "9".repeat(64)));
+        let id = unregistered.decision_set.decision_set_id.clone();
+        save_pending_decision_set_promotion(&connection, &unregistered).unwrap();
+        assert!(complete_pending_decision_set_promotion(&mut connection, &id).is_err());
+        assert!(get_decision_set_metadata(&connection, &id)
+            .unwrap()
+            .is_none());
+        assert!(list_decision_attempts(&connection, 10).unwrap().is_empty());
+        assert_eq!(
+            list_pending_decision_set_promotions(&connection)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_failed_decision_migration_rolls_back_to_feature_schema() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let mut broken = MIGRATIONS[..6].to_vec();
+        broken.push(Migration {
+            version: 7,
+            name: "intentional_decision_failure_fixture",
+            sql: "CREATE TABLE decision_sets(id INTEGER); INSERT INTO missing_table VALUES (1);",
+        });
+        assert!(migrate_with(&mut connection, &broken, 7).is_err());
+        assert_eq!(schema_version(&connection).unwrap(), 6);
+        let decision_tables = |connection: &Connection| -> u32 {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'decision%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(decision_tables(&connection), 0);
+
+        assert_eq!(migrate(&mut connection).unwrap(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(decision_tables(&connection), 3);
     }
 }

@@ -5,6 +5,7 @@ members = [
   "crates/rg-feature-studio",
   "crates/rg-governance",
   "crates/rg-persistence",
+  "crates/rg-strategy-engine",
   "src-tauri",
 ]
 default-members = [
@@ -13,6 +14,7 @@ default-members = [
   "crates/rg-feature-studio",
   "crates/rg-governance",
   "crates/rg-persistence",
+  "crates/rg-strategy-engine",
   "src-tauri",
 ]
 resolver = "3"

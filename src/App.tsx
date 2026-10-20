@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import DataGround from "./DataGround";
 import FeatureStudio from "./FeatureStudio";
+import StrategyStudio from "./StrategyStudio";
 import type { FoundationSnapshot } from "./types";
 
 const navigation = [
@@ -152,6 +153,8 @@ export default function App() {
           <DataGround />
         ) : activePage === "feature-studio" ? (
           <FeatureStudio />
+        ) : activePage === "strategy-studio" ? (
+          <StrategyStudio />
         ) : (
           <PlannedPage
             label={currentPage.label}

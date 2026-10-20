@@ -1,19 +1,19 @@
 schema_version: 3
 current_phase: RG-R03
-builder_status: NOT_STARTED
-automated_status: NOT_RUN
+builder_status: IMPLEMENTED
+automated_status: AUTOMATED_PASS
 owner_ui_status: PENDING
 owner_acceptance: PENDING
 next_phase_unlocked: false
 deliverables:
-  verified_feature_input: PLANNED
-  strategy_registry: PLANNED
-  decision_engine: PLANNED
-  causal_context_joins: PLANNED
-  immutable_decision_sets: PLANNED
-  resource_controls: PLANNED
-  strategy_studio_ui: PLANNED
-  acceptance_evidence: PLANNED
+  verified_feature_input: TESTED
+  strategy_registry: TESTED
+  decision_engine: TESTED
+  causal_context_joins: TESTED
+  immutable_decision_sets: TESTED
+  resource_controls: TESTED
+  strategy_studio_ui: TESTED
+  acceptance_evidence: TESTED
 accepted_phases:
   - phase: RG-R00
     owner_acceptance: OWNER_ACCEPTED
