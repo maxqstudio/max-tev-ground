@@ -12,10 +12,32 @@ The known `cancelPreview` path can report a misleading generic error when cancel
 
 ## RG-R02 status
 
-RG-R02 Feature Studio is the active authorized phase after closure. Its implementation has not started in this transition. The mandatory feature gates are registered in `PHASE_MANIFEST.yaml`, and their automated acceptance status remains `NOT_RUN`. The Feature Studio page reports the handoff state and does not present a working feature engine.
+RG-R02 Feature Studio is implemented on `work/rg-r02-feature-studio`. The Control Room audit of PR #6 head `7a828b63a69f30d8c3bbf03b45505b2dfb2a1ead` returned `REPAIR_REQUIRED` for two defects. Both were repaired on the same branch in `0e76f26a5cc06788f8aa72a0ce996ae07be28590`, and the Control Room source re-audit verified the repairs. It is not Owner accepted.
 
-## RG-R01 acceptance runner
+- P1: a registered feature set stayed `READY` after its source `bars.parquet` was tampered with, because catalogue reads checked only SQLite status and stored fingerprints. Catalogue reads and the downstream output accessor now re-verify every source snapshot's current bytes and canonical hashes through Data Ground, with no SQLite lock held while hashing; a missing, modified, unverifiable, or non-`READY` source quarantines the set.
+- P2: `max_input_rows` was checked per dataset. It is now the aggregate of the unique physical input datasets, checked once with overflow-checked arithmetic before materialization; `max_target_rows` is unchanged.
 
-`RUN_ACCEPTANCE.ps1` is scoped to the historical `work/rg-r01-data-ground` candidate branch and runs non-interactively from the authorized Windows root. It checks pinned Rust/Node toolchains, Windows prerequisites, roadmap synchronization, Rust formatting/tests/lint/build, frontend lint/typecheck/tests/build, and Tauri build when MSVC is available. It writes per-command logs and a checksummed report bound to its exact candidate SHA/tree. It never launches the desktop or reads, copies, or modifies the legacy research baseline.
+Each regression was run against the unrepaired head and failed, then passed after the repair. The machine-readable state records `builder_status: IMPLEMENTED` and `automated_status: AUTOMATED_PASS` for the candidate, with `owner_ui_status: PENDING`, `owner_acceptance: PENDING`, and `next_phase_unlocked: false`. The acceptance gate IDs in `PHASE_MANIFEST.yaml` are unchanged from the activation commit.
 
-GitHub CI now names uploaded source-bound evidence generically so future phase artifacts are not mislabeled as RG-R01. Passing CI code/build checks do not claim RG-R02 acceptance gates passed. RG-R03–RG-R08 remain planned.
+Each automated gate is evidenced by tests named after its gate ID (Rust `gate_<id>_*`; frontend `gate feature_studio_ui ...`). `scripts/Invoke-PhaseGateTests.ps1` runs each gate's tests separately, fails a gate that has no matching tests, writes per-gate logs, and writes `phase-gates.json` with test counts. `New-CiEvidence.ps1` embeds those counts and their checksum in `acceptance.json`. A generic suite pass is never inherited as gate evidence: `Test-CiEvidence.ps1` proves that without per-gate results every feature gate reports `NOT_RUN`.
+
+All feature inputs in tests are labeled synthetic fixtures (`synthetic-fixture:` source IDs) imported through the real Data Ground importer. They are not market data or evidence of edge. No real historical dataset was available to CI, so the real-data baseline remains `NOT_VERIFIED_BY_GITHUB_CI`. The Feature Studio desktop UI was exercised only by headless component and Tauri IPC tests; manual Owner UI review is **pending, not tested**.
+
+The RG-R01 `cancelPreview` cancel-to-refresh UX debt is unchanged in Data Ground and remains declared debt. Feature Studio's own cancel and confirm paths report the job outcome separately from any later catalogue refresh.
+
+## Desktop functional readiness (Owner direction, PR #6 comment #6287687918)
+
+The Control Room re-audit verified the P1/P2 repairs and the exact-SHA CI. The Owner then set the next gate as `DESKTOP_FUNCTIONAL_READY_FOR_OWNER_TEST`: a desktop app that builds, launches and completes the basic workflow. Visual design acceptance is not part of this gate.
+
+- Launcher: `RUN_DESKTOP.ps1` printed informational native stderr, such as Tauri's `Info ... workspace inheritance` lines, inside a PowerShell `NativeCommandError` banner. A successful build therefore looked fatal. The build itself had exited 0. Native stderr is now shown and logged as its own text, and success is still decided only by the exit code. A nonzero exit still stops the launcher with its diagnostics. The MSVC setup no longer prints a misleading `'vswhere.exe' is not recognized` line. A launch counts as successful only once the main window appears; an exit during start-up, or no window within 30 seconds, is reported as a failure. These were verified under Windows PowerShell 5.1. PowerShell 7 is not installed on the builder machine and was not run.
+- Feature Studio ordinary-operation blockers were fixed without changing the layout. When no dataset was eligible, the page did not say why each registered dataset was unavailable (for example `BLOCKED` by gap audit); it now does. After Refresh found a newly `READY` dataset, the target selector appeared to show it while no target was actually selected, so preview failed; Refresh now selects the first eligible dataset and series.
+- The workflow smoke `gate_feature_studio_ui_ipc_end_to_end_desktop_workflow_survives_restart` drives the IPC commands the desktop UI calls. It runs on a labeled synthetic fixture in isolated storage: import, confirm `READY`, choose the input, preview, freeze, list and inspect, restart, reuse, cancel, check that source bytes are unchanged, and block a tampered source.
+- The native executable was built and launched through the launcher, rendered its WebView window, stayed responsive, closed gracefully with exit code 0, and relaunched from the verified cached build. Clicking through the GUI was not automated, because the builder contract forbids desktop input automation. The Owner's hands-on test remains pending.
+
+**Deferred UX debt (not accepted, not waived):** the Owner finds the current UI confusing and visually unsatisfactory. The visual redesign is deferred. Nothing in this section records `OWNER_UI_PASS` or Owner acceptance.
+
+## Acceptance runner
+
+`RUN_ACCEPTANCE.ps1` is scoped to the `work/rg-r02-feature-studio` candidate branch and runs non-interactively from the authorized Windows root. It checks pinned Rust/Node toolchains, Windows prerequisites, roadmap synchronization, CI evidence contracts, Rust formatting/tests/lint/build, frontend lint/typecheck/tests/build, the phase gate-traceable tests, and the Tauri build when MSVC is available. It writes per-command logs and a checksummed report bound to the exact candidate SHA/tree. It never launches the desktop or reads, copies, or modifies the legacy research baseline.
+
+GitHub CI runs the same gate-traceable step and uploads source-bound evidence, including the per-gate logs. RG-R03–RG-R08 remain planned.

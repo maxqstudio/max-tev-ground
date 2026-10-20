@@ -208,6 +208,16 @@ $report = [ordered]@{
     legacy_baseline_status = "NOT_VERIFIED_BY_GITHUB_CI"
     gates = $gates
 }
+# Per-gate test counts written by Invoke-PhaseGateTests.ps1 into the same evidence directory.
+$phaseGateSummaryPath = Join-Path $OutputDirectory "phase-gates.json"
+if (Test-Path -LiteralPath $phaseGateSummaryPath -PathType Leaf) {
+    $phaseGateSummary = Get-Content -LiteralPath $phaseGateSummaryPath -Raw | ConvertFrom-Json
+    if ($phaseGateSummary.phase -ne $phaseName) { throw "Phase gate test summary belongs to $($phaseGateSummary.phase), not $phaseName" }
+    $report["phase_gate_tests"] = [ordered]@{
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $phaseGateSummaryPath).Hash.ToLowerInvariant()
+        gates = @($phaseGateSummary.gates)
+    }
+}
 
 $reportPath = Join-Path $OutputDirectory "acceptance.json"
 $json = $report | ConvertTo-Json -Depth 16

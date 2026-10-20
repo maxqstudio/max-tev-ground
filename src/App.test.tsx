@@ -10,25 +10,25 @@ const fixtureSnapshot: FoundationSnapshot = {
   project: "MAX Research Ground",
   current_phase: "RG-R02",
   phase_lifecycle: "ACTIVE",
-  builder_status: "NOT_STARTED",
-  automated_status: "NOT_RUN",
+  builder_status: "IMPLEMENTED",
+  automated_status: "AUTOMATED_PASS",
   owner_ui_status: "PENDING",
   owner_acceptance: "PENDING",
   next_phase_unlocked: false,
   deliverables: {
-    verified_input_authority: "PLANNED",
-    indicator_registry: "PLANNED",
-    causal_feature_engine: "PLANNED",
-    multi_timeframe_joins: "PLANNED",
-    immutable_feature_sets: "PLANNED",
-    resource_controls: "PLANNED",
-    feature_studio_ui: "PLANNED",
-    acceptance_evidence: "PLANNED",
+    verified_input_authority: "TESTED",
+    indicator_registry: "TESTED",
+    causal_feature_engine: "TESTED",
+    multi_timeframe_joins: "TESTED",
+    immutable_feature_sets: "TESTED",
+    resource_controls: "TESTED",
+    feature_studio_ui: "TESTED",
+    acceptance_evidence: "TESTED",
   },
   pages: [
     { id: "overview", status: "IMPLEMENTED" },
     { id: "data-ground", status: "OWNER_ACCEPTED" },
-    { id: "feature-studio", status: "ACTIVE_NOT_STARTED" },
+    { id: "feature-studio", status: "IN_PROGRESS" },
     { id: "strategy-studio", status: "PLANNED" },
     { id: "model-lab", status: "PLANNED" },
     { id: "policy-studio", status: "PLANNED" },
@@ -125,18 +125,36 @@ describe("desktop shell navigation", () => {
   it("loads the governance snapshot through the Tauri IPC boundary", async () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "MAX Research Ground" })).toBeTruthy();
-    expect(screen.getByText("NOT RUN")).toBeTruthy();
+    expect(screen.getByText("AUTOMATED PASS")).toBeTruthy();
+    expect(screen.getByText("Owner UI review").nextElementSibling?.textContent).toBe("PENDING");
     expect(screen.getAllByText("LOCKED")).toHaveLength(2);
     expect(screen.getByText("Verified input authority")).toBeTruthy();
     expect(screen.getByText(/waived, not tested/)).toBeTruthy();
   });
 
-  it("shows the authorized Feature Studio handoff without presenting it as implemented", async () => {
+  it("routes the active Feature Studio phase to its workflow while later phases stay planned", async () => {
+    mockIPC((command) => {
+      if (command === "get_foundation_status") return fixtureSnapshot;
+      if (command === "get_feature_registry") {
+        return {
+          engineId: "rg-native-features",
+          engineVersion: "1.0.0",
+          temporalSemantics: { version: 1, decision_boundary: "", current_bar: "", window_basis: "", warmup: "", reference_join: "", reference_staleness: "", gaps: "" },
+          indicators: [],
+          limits: { maxFeatures: 32, maxPeriod: 500, maxStalenessSeconds: 1, maxAvailabilityLagSeconds: 0, previewRows: 20 },
+          researchNotice: "Derived research features; not trading signals.",
+        };
+      }
+      if (command === "list_feature_inputs" || command === "list_feature_sets" || command === "list_feature_attempts") return [];
+      if (command === "get_active_feature_job") return null;
+      return undefined;
+    });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /Feature Studio/ }));
-    expect(await screen.findByRole("heading", { name: "Feature Studio implementation has not started" })).toBeTruthy();
-    expect(screen.getByText("ACTIVE NOT STARTED")).toBeTruthy();
-    expect(screen.getByText(/implementation handoff is pending/)).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 1, name: "Feature Studio" })).toBeTruthy();
+    expect(await screen.findByText(/No READY verified dataset is registered/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Strategy Studio/ }));
+    expect(await screen.findByRole("heading", { name: "Strategy Studio is not implemented yet" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Overview/ }));
     expect(await screen.findByText(/Desktop UI and CSV import review were waived, NOT TESTED/)).toBeTruthy();
     expect(screen.getByText(/Known UX debt \(unresolved\)/)).toBeTruthy();

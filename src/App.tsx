@@ -11,6 +11,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import DataGround from "./DataGround";
+import FeatureStudio from "./FeatureStudio";
 import type { FoundationSnapshot } from "./types";
 
 const navigation = [
@@ -143,6 +144,8 @@ export default function App() {
           <Overview snapshot={snapshot} error={error} />
         ) : activePage === "data-ground" ? (
           <DataGround />
+        ) : activePage === "feature-studio" ? (
+          <FeatureStudio />
         ) : (
           <PlannedPage
             label={currentPage.label}

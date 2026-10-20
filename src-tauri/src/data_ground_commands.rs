@@ -77,6 +77,11 @@ impl DataGroundState {
         })
     }
 
+    /// The shared dataset registry, so Feature Studio reads the same verified snapshots.
+    pub fn store(&self) -> Arc<DatasetStore> {
+        Arc::clone(&self.store)
+    }
+
     fn insert_selected_source(&self, path: PathBuf) -> Result<SelectedSource, String> {
         let file_name = path
             .file_name()
@@ -105,8 +110,9 @@ impl DataGroundState {
             .ok_or_else(|| "selected source token is invalid or expired".to_owned())
     }
 
+    /// Stands in for the native file picker in headless IPC tests.
     #[cfg(test)]
-    fn select_for_test(&self, path: PathBuf) -> SelectedSource {
+    pub(crate) fn select_for_test(&self, path: PathBuf) -> SelectedSource {
         self.insert_selected_source(path).unwrap()
     }
 }

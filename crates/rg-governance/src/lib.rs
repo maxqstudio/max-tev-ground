@@ -625,8 +625,10 @@ mod tests {
         let result = validate_embedded().unwrap();
         assert_eq!(result.current_phase, "RG-R02");
         assert_eq!(result.phase_lifecycle, Lifecycle::Active);
-        assert_eq!(result.builder_status, BuilderStatus::NotStarted);
-        assert_eq!(result.automated_status, AutomatedStatus::NotRun);
+        assert_eq!(result.builder_status, BuilderStatus::Implemented);
+        assert_eq!(result.automated_status, AutomatedStatus::AutomatedPass);
+        assert_eq!(result.owner_ui_status, OwnerUiStatus::Pending);
+        assert_eq!(result.owner_acceptance, OwnerAcceptanceStatus::Pending);
         assert!(!result.next_phase_unlocked);
         assert_eq!(result.pages.len(), 8);
         assert_eq!(
@@ -653,7 +655,7 @@ mod tests {
                 .find(|page| page.id == "feature-studio")
                 .unwrap()
                 .status,
-            "ACTIVE_NOT_STARTED"
+            "IN_PROGRESS"
         );
         assert_eq!(result.accepted_phases.len(), 2);
         let accepted_r01 = result
@@ -829,12 +831,41 @@ mod tests {
 
     #[test]
     fn not_started_phase_cannot_claim_automated_pass() {
-        let changed = IMPLEMENTATION_SOURCE.replace(
-            "automated_status: NOT_RUN",
-            "automated_status: AUTOMATED_PASS",
-        );
+        let changed = IMPLEMENTATION_SOURCE
+            .replace("builder_status: IMPLEMENTED", "builder_status: NOT_STARTED");
+        assert!(changed.contains("automated_status: AUTOMATED_PASS"));
         let error = parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &changed).unwrap_err();
         assert!(error.contains("cannot claim automated acceptance"));
+    }
+
+    #[test]
+    fn rg_r02_builder_cannot_self_accept_ui_or_owner_review_or_unlock_rg_r03() {
+        for (from, to, expected) in [
+            (
+                "owner_ui_status: PENDING",
+                "owner_ui_status: OWNER_ACCEPTED",
+                "cannot claim Owner acceptance or UI review",
+            ),
+            (
+                "owner_acceptance: PENDING",
+                "owner_acceptance: OWNER_ACCEPTED",
+                "Owner acceptance cannot precede",
+            ),
+            (
+                "next_phase_unlocked: false",
+                "next_phase_unlocked: true",
+                "must not unlock a later phase",
+            ),
+        ] {
+            assert!(IMPLEMENTATION_SOURCE.contains(from), "{from}");
+            let changed = IMPLEMENTATION_SOURCE.replacen(from, to, 1);
+            let error = parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &changed).unwrap_err();
+            assert!(error.contains(expected), "{to}: {error}");
+        }
+        // The first PLANNED lifecycle in the roadmap is RG-R03's.
+        let activated = ROADMAP_SOURCE.replacen("lifecycle: PLANNED", "lifecycle: ACTIVE", 1);
+        assert_ne!(activated, ROADMAP_SOURCE);
+        assert!(parse_documents(&activated, PHASE_SOURCE, IMPLEMENTATION_SOURCE).is_err());
     }
 
     #[test]

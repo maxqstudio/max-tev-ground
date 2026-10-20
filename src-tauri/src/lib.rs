@@ -1,4 +1,5 @@
 mod data_ground_commands;
+mod feature_studio_commands;
 
 use tauri::Manager;
 
@@ -25,7 +26,16 @@ fn register_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Bu
         data_ground_commands::cancel_dataset_catalog_verification,
         data_ground_commands::list_datasets,
         data_ground_commands::inspect_dataset,
-        data_ground_commands::list_import_attempts
+        data_ground_commands::list_import_attempts,
+        feature_studio_commands::get_feature_registry,
+        feature_studio_commands::list_feature_inputs,
+        feature_studio_commands::preview_feature_set,
+        feature_studio_commands::get_active_feature_job,
+        feature_studio_commands::confirm_feature_set,
+        feature_studio_commands::cancel_feature_job,
+        feature_studio_commands::list_feature_sets,
+        feature_studio_commands::inspect_feature_set,
+        feature_studio_commands::list_feature_attempts
     ])
 }
 
@@ -34,7 +44,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_directory = app.path().app_data_dir()?;
-            app.manage(data_ground_commands::DataGroundState::open(data_directory)?);
+            let data_ground = data_ground_commands::DataGroundState::open(&data_directory)?;
+            let feature_studio = feature_studio_commands::FeatureStudioState::open(
+                &data_directory,
+                data_ground.store(),
+            )?;
+            app.manage(data_ground);
+            app.manage(feature_studio);
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -76,8 +92,10 @@ mod tests {
 
         assert_eq!(response["current_phase"], "RG-R02");
         assert_eq!(response["phase_lifecycle"], "ACTIVE");
-        assert_eq!(response["builder_status"], "NOT_STARTED");
-        assert_eq!(response["automated_status"], "NOT_RUN");
+        assert_eq!(response["builder_status"], "IMPLEMENTED");
+        assert_eq!(response["automated_status"], "AUTOMATED_PASS");
+        assert_eq!(response["owner_ui_status"], "PENDING");
+        assert_eq!(response["owner_acceptance"], "PENDING");
         assert_eq!(response["pages"].as_array().unwrap().len(), 8);
         assert_eq!(
             response["accepted_phases"][1]["owner_ui_status"],
@@ -88,7 +106,8 @@ mod tests {
             "46c8969bc31faa7f3efaa6474d5ced2322270623"
         );
         assert_eq!(response["pages"][1]["status"], "OWNER_ACCEPTED");
-        assert_eq!(response["pages"][2]["status"], "ACTIVE_NOT_STARTED");
+        assert_eq!(response["pages"][2]["status"], "IN_PROGRESS");
+        assert_eq!(response["pages"][3]["status"], "PLANNED");
         assert!(!response["next_phase_unlocked"].as_bool().unwrap());
     }
 
@@ -98,11 +117,11 @@ mod tests {
         assert_eq!(response.current_phase, "RG-R02");
         assert_eq!(
             response.builder_status,
-            rg_governance::BuilderStatus::NotStarted
+            rg_governance::BuilderStatus::Implemented
         );
         assert_eq!(
-            response.automated_status,
-            rg_governance::AutomatedStatus::NotRun
+            response.owner_ui_status,
+            rg_governance::OwnerUiStatus::Pending
         );
         assert_eq!(
             response.owner_acceptance,

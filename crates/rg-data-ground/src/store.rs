@@ -348,6 +348,15 @@ impl DatasetStore {
         &self,
         dataset_id: &str,
     ) -> Result<Option<DatasetCatalogEntry>, DatasetStoreError> {
+        self.inspect_dataset_with_cancel(dataset_id, &AtomicBool::new(false))
+    }
+
+    /// [`DatasetStore::inspect_dataset`] whose snapshot hashing stops when `cancel` is set.
+    pub fn inspect_dataset_with_cancel(
+        &self,
+        dataset_id: &str,
+        cancel: &AtomicBool,
+    ) -> Result<Option<DatasetCatalogEntry>, DatasetStoreError> {
         validate_dataset_id(dataset_id)?;
         let _verification = self
             .verification_lock
@@ -357,10 +366,19 @@ impl DatasetStore {
             let connection = self.connection_guard()?;
             get_dataset_metadata(&connection, dataset_id)?
         };
-        let cancel = AtomicBool::new(false);
         metadata
-            .map(|item| self.verify_metadata(&item, &cancel))
+            .map(|item| self.verify_metadata(&item, cancel))
             .transpose()
+    }
+
+    /// Path of a registered snapshot's canonical bars file. Callers must verify the dataset with
+    /// [`DatasetStore::inspect_dataset`] and re-check the file digest around every read.
+    pub fn canonical_bars_path(&self, dataset_id: &str) -> Result<PathBuf, DatasetStoreError> {
+        validate_dataset_id(dataset_id)?;
+        Ok(self
+            .datasets_directory
+            .join(dataset_id)
+            .join("bars.parquet"))
     }
 
     pub fn list_attempts(&self) -> Result<Vec<ImportAttemptSummary>, DatasetStoreError> {

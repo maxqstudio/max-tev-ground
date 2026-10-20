@@ -39,6 +39,9 @@ function Import-MsvcEnvironment {
     $vsDevCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
     if (-not (Test-Path -LiteralPath $vsDevCmd -PathType Leaf)) { throw "VsDevCmd.bat is missing from the detected Visual Studio Build Tools installation." }
 
+    # VsDevCmd.bat calls vswhere.exe by name; without the installer directory on PATH it prints a
+    # misleading "'vswhere.exe' is not recognized" line even though initialization succeeds.
+    $env:PATH = "$(Split-Path -Parent $vswhere);$env:PATH"
     $quote = [char]34
     $commandLine = "call $quote$vsDevCmd$quote -no_logo -arch=x64 -host_arch=x64 >nul && set"
     $environmentLines = & $env:ComSpec /d /s /c $commandLine
@@ -102,6 +105,7 @@ try {
             $cacheManifest.source_fingerprint -eq $sourceFingerprint -and
             $cacheManifest.executable_sha256 -eq (Get-FileHash -LiteralPath $cachedExe -Algorithm SHA256).Hash) {
             $exe = $cachedExe
+            $RunnerLog = $cacheManifest.build_log
             Write-Host "Using the verified local desktop build for source fingerprint $sourceFingerprint."
         }
     }
@@ -193,10 +197,15 @@ try {
 
     if ($PSCmdlet.ShouldProcess($exe, "Launch MAX Research Ground")) {
         $process = Start-Process -FilePath $exe -WorkingDirectory $Root -PassThru
-        Start-Sleep -Milliseconds 800
-        $process.Refresh()
+        # Launch succeeds only once the app shows its main window; WebView2 start-up can take several seconds.
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            Start-Sleep -Milliseconds 500
+            $process.Refresh()
+        } until ($process.HasExited -or $process.MainWindowHandle -ne [IntPtr]::Zero -or [DateTime]::UtcNow -ge $deadline)
         if ($process.HasExited) { throw "MAX Research Ground exited during startup (exit code $($process.ExitCode)). See the acceptance report or build log." }
-        Write-Host "MAX Research Ground launched (PID $($process.Id))."
+        if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw "MAX Research Ground is running (PID $($process.Id)) but showed no window within 30 seconds." }
+        Write-Host "MAX Research Ground launched (PID $($process.Id)); window '$($process.MainWindowTitle)' is open."
     }
 } catch {
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red

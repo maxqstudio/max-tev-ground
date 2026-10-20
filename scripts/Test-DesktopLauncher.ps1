@@ -50,6 +50,9 @@ try {
     $informativeText = Get-Content -LiteralPath $informativeLog -Raw
     Assert-That ($informativeText -match 'fixture stdout line') "Stdout was not preserved in the build log"
     Assert-That ($informativeText -match 'Info fixture: informational stderr line') "Informative stderr was not preserved in the build log"
+    # Windows PowerShell 5.1 wraps redirected stderr in NativeCommandError records; the launcher must show and log
+    # the native line itself, not a PowerShell error banner that makes a successful build look fatal.
+    Assert-That ($informativeText -notmatch 'NativeCommandError|FullyQualifiedErrorId|CategoryInfo|RemoteException') "Informative stderr was rendered as a PowerShell error record"
 
     # A nonzero exit is failure even when it is the only signal; the exit code must come back unchanged.
     $failureLog = Join-Path $fixtureRoot "failure.log"
@@ -57,7 +60,9 @@ try {
         & $node -e "console.error('fixture failure line'); process.exit(17)" 2>&1
     }
     Assert-That ($failureExit -eq 17) "Nonzero native exit code was reported as $failureExit instead of 17"
-    Assert-That ((Get-Content -LiteralPath $failureLog -Raw) -match 'fixture failure line') "Failure stderr was not preserved in the build log"
+    $failureText = Get-Content -LiteralPath $failureLog -Raw
+    Assert-That ($failureText -match 'fixture failure line') "Failure stderr was not preserved in the build log"
+    Assert-That ($failureText -notmatch 'NativeCommandError|FullyQualifiedErrorId') "Failure stderr was rendered as a PowerShell error record instead of the native diagnostic"
 
     # A command that never reports an exit code must not be treated as success.
     $silentLog = Join-Path $fixtureRoot "silent.log"
