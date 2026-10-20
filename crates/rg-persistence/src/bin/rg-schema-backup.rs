@@ -6,18 +6,29 @@
 
 use std::{env, path::PathBuf, process::ExitCode};
 
-use rg_persistence::{list_schema_backups, restore_schema_backup};
+use rg_persistence::{list_schema_backups, restore_schema_backup, verify_schema_backup};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let result = match arguments.as_slice() {
-        [command, database] if command == "list" => list_schema_backups(&PathBuf::from(database))
-            .map(|backups| {
+        // Each backup is listed with its receipt check, so an unverifiable one is never offered
+        // as restorable.
+        [command, database] if command == "list" => {
+            let database = PathBuf::from(database);
+            list_schema_backups(&database).map(|backups| {
                 for backup in &backups {
-                    println!("{}", backup.display());
+                    match verify_schema_backup(&database, backup) {
+                        Ok(verified) => println!(
+                            "VERIFIED schema-v{} {}",
+                            verified.schema_version,
+                            backup.display()
+                        ),
+                        Err(error) => println!("UNVERIFIED {} ({error})", backup.display()),
+                    }
                 }
                 println!("SCHEMA_BACKUPS={}", backups.len());
-            }),
+            })
+        }
         [command, database, backup] if command == "restore" => {
             restore_schema_backup(&PathBuf::from(database), &PathBuf::from(backup)).map(
                 |restored| {

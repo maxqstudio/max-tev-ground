@@ -70,8 +70,8 @@ fn gate_resource_cancel_recovery_schema_backup_cli_lists_and_restores_a_v6_store
     assert!(text.contains("SCHEMA_BACKUPS=1"), "{text}");
     let backup = text
         .lines()
-        .find(|line| line.ends_with(".sqlite3") && line.contains("schema-v6"))
-        .unwrap()
+        .find_map(|line| line.strip_prefix("VERIFIED schema-v6 "))
+        .unwrap_or_else(|| panic!("no verified backup listed: {text}"))
         .to_owned();
 
     let (restored, text) = run(&["restore", database, &backup]);

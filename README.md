@@ -32,7 +32,7 @@ A build that includes RG-R03 upgrades an existing research database from schema 
 .\RESTORE_DATABASE_BACKUP.ps1 -Backup <listed path>  # restores one; asks for confirmation, -WhatIf previews
 ```
 
-The restore moves the current database files aside under a `.pre-restore-*` name; it never deletes them. Anything recorded after the upgrade is only in those preserved files.
+Only backups listed as `VERIFIED` can be restored: each must still match the checksum receipt written when it was taken. The restore moves the current database files aside under a `.pre-restore-*` name; it never deletes them. If the restored copy fails its final check, the original files are put back. Anything recorded after the upgrade is only in the preserved files.
 
 ## RG-R01 Data Ground (accepted)
 

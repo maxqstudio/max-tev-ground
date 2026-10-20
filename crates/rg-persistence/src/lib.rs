@@ -41,6 +41,8 @@ pub enum PersistenceError {
     SchemaBackupFailed(String),
     #[error("schema backup restore was refused or failed: {0}")]
     SchemaRestoreFailed(String),
+    #[error("schema backup does not match its receipt: {0}")]
+    SchemaBackupUnverified(String),
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -413,6 +415,151 @@ pub struct SchemaBackup {
     pub content_sha256: String,
 }
 
+pub const SCHEMA_BACKUP_RECEIPT_VERSION: u16 = 1;
+
+/// Checksum receipt written beside a backup when it is created, from the source database's own
+/// digest. Verification compares a backup against its receipt and never recomputes the expected
+/// values from the backup itself. It detects changes to the backup alone; it is not a signature
+/// against someone able to rewrite both the backup and its receipt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaBackupReceipt {
+    pub receipt_version: u16,
+    pub backup_file_name: String,
+    pub source_database_file_name: String,
+    pub schema_version: u32,
+    pub content_sha256: String,
+    pub file_sha256: String,
+    pub file_bytes: u64,
+}
+
+/// Path of the receipt that belongs to a backup file.
+pub fn schema_backup_receipt_path(backup_path: &Path) -> std::path::PathBuf {
+    let mut name = backup_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".receipt.json");
+    backup_path.with_file_name(name)
+}
+
+fn file_sha256_and_len(path: &Path) -> Result<(String, u64), std::io::Error> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        hasher.update(&buffer[..count]);
+    }
+    Ok((
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        total,
+    ))
+}
+
+fn file_name_text(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Writes a receipt next to its backup atomically: a new temporary file, flushed, then renamed.
+fn write_receipt(backup_path: &Path, receipt: &SchemaBackupReceipt) -> Result<(), String> {
+    use std::io::Write;
+    let target = schema_backup_receipt_path(backup_path);
+    let temporary = target.with_extension("tmp");
+    let json = serde_json::to_vec_pretty(receipt).map_err(|error| error.to_string())?;
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(&json)?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&temporary, &target));
+    written.map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        format!(
+            "could not write the backup receipt {}: {error}",
+            target.display()
+        )
+    })
+}
+
+/// Verifies a backup against the receipt written when it was created: the receipt must name this
+/// backup and database; the backup's raw SHA-256 and size must match; and SQLite's integrity check,
+/// schema version, and logical content digest must match the receipt. Returns the verified backup.
+pub fn verify_schema_backup(
+    database_path: &Path,
+    backup_path: &Path,
+) -> Result<SchemaBackup, PersistenceError> {
+    let unverified = |reason: String| PersistenceError::SchemaBackupUnverified(reason);
+    let directory = std::fs::canonicalize(backup_directory(database_path)?)
+        .map_err(|error| unverified(format!("no schema backup directory: {error}")))?;
+    let backup = std::fs::canonicalize(backup_path)
+        .map_err(|error| unverified(format!("backup is not readable: {error}")))?;
+    if backup.parent() != Some(directory.as_path()) || !is_regular_file(&backup) {
+        return Err(unverified(
+            "backup must be a regular file in the database's schema-backups directory".into(),
+        ));
+    }
+    let receipt_path = schema_backup_receipt_path(&backup);
+    if !is_regular_file(&receipt_path) {
+        return Err(unverified(format!(
+            "receipt {} is missing; the backup's original content cannot be confirmed",
+            receipt_path.display()
+        )));
+    }
+    let receipt: SchemaBackupReceipt = serde_json::from_slice(&std::fs::read(&receipt_path)?)
+        .map_err(|error| unverified(format!("receipt is malformed: {error}")))?;
+    let sha = |value: &str| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit());
+    if receipt.receipt_version != SCHEMA_BACKUP_RECEIPT_VERSION
+        || receipt.backup_file_name != file_name_text(&backup)
+        || receipt.source_database_file_name != file_name_text(database_path)
+        || receipt.schema_version == 0
+        || receipt.schema_version > CURRENT_SCHEMA_VERSION
+        || !sha(&receipt.content_sha256)
+        || !sha(&receipt.file_sha256)
+    {
+        return Err(unverified(
+            "receipt does not describe this backup of this database".into(),
+        ));
+    }
+    let (file_sha256, file_bytes) = file_sha256_and_len(&backup)?;
+    if file_sha256 != receipt.file_sha256 || file_bytes != receipt.file_bytes {
+        return Err(unverified(
+            "backup file bytes changed since the backup was taken".into(),
+        ));
+    }
+    let (version, digest) = verified_snapshot(&backup).map_err(unverified)?;
+    if version != receipt.schema_version || digest != receipt.content_sha256 {
+        return Err(unverified(
+            "backup content no longer matches the content that was backed up".into(),
+        ));
+    }
+    Ok(SchemaBackup {
+        path: backup,
+        schema_version: receipt.schema_version,
+        content_sha256: receipt.content_sha256,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only fault: report the installed restore as failing its final verification.
+    static FAIL_INSTALLED_VERIFICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Result of restoring a schema backup over a database.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoredDatabase {
@@ -580,6 +727,26 @@ pub fn backup_before_upgrade(
                 Ok(digest)
             }
         });
+    // The receipt anchors what was backed up, using the source's own digest. Without it the
+    // backup cannot be trusted later, so its absence is a failed backup.
+    let result = result.and_then(|content_sha256| {
+        let (file_sha256, file_bytes) =
+            file_sha256_and_len(&target).map_err(|error| failed(error.to_string()))?;
+        write_receipt(
+            &target,
+            &SchemaBackupReceipt {
+                receipt_version: SCHEMA_BACKUP_RECEIPT_VERSION,
+                backup_file_name: file_name_text(&target),
+                source_database_file_name: file_name_text(database_path),
+                schema_version: schema_version_before,
+                content_sha256: content_sha256.clone(),
+                file_sha256,
+                file_bytes,
+            },
+        )
+        .map_err(failed)?;
+        Ok(content_sha256)
+    });
     match result {
         Ok(content_sha256) => Ok(SchemaBackup {
             path: target,
@@ -616,30 +783,23 @@ pub fn list_schema_backups(
 }
 
 /// Restores a verified pre-upgrade backup as the database, for example so a previously accepted
-/// application build can open it again. The application must be closed: the restore is refused
-/// while any connection keeps the database busy. The current database, WAL, and shared-memory
-/// files are renamed aside, never deleted, and the installed copy is verified against the
-/// backup's version and content digest.
+/// application build can open it again. The backup must match the receipt written when it was
+/// taken ([`verify_schema_backup`]). The application must be closed: the restore is refused while
+/// any connection keeps the database busy. The current database, WAL, and shared-memory files are
+/// renamed aside, never deleted, and the installed copy is verified against the receipt. If that
+/// final verification fails, the installed copy is moved aside and the original files are put back.
 pub fn restore_schema_backup(
     database_path: &Path,
     backup_path: &Path,
 ) -> Result<RestoredDatabase, PersistenceError> {
     let refused = |reason: String| PersistenceError::SchemaRestoreFailed(reason);
-    let directory = std::fs::canonicalize(backup_directory(database_path)?)
-        .map_err(|error| refused(format!("no schema backup directory: {error}")))?;
-    let backup = std::fs::canonicalize(backup_path)
-        .map_err(|error| refused(format!("backup is not readable: {error}")))?;
-    if backup.parent() != Some(directory.as_path()) || !is_regular_file(&backup) {
-        return Err(refused(
-            "backup must be a regular file in the database's schema-backups directory".into(),
-        ));
-    }
-    let (version, digest) = verified_snapshot(&backup).map_err(refused)?;
-    if version == 0 || version > CURRENT_SCHEMA_VERSION {
-        return Err(refused(format!(
-            "backup has unsupported schema version {version}"
-        )));
-    }
+    let verified = verify_schema_backup(database_path, backup_path)
+        .map_err(|error| refused(error.to_string()))?;
+    let (backup, version, digest) = (
+        verified.path,
+        verified.schema_version,
+        verified.content_sha256,
+    );
 
     // Early refusal when a checkpoint cannot complete. It does not catch every open connection;
     // the file moves below are the authoritative check and undo themselves on failure.
@@ -737,11 +897,49 @@ pub fn restore_schema_backup(
             "could not install the restored database: {error}"
         )));
     }
-    let (restored_version, restored_digest) = verified_snapshot(database_path).map_err(refused)?;
-    if restored_version != version || restored_digest != digest {
-        return Err(refused(
-            "restored database does not match the backup; the previous files were preserved".into(),
+    let installed = verified_snapshot(database_path);
+    #[cfg(test)]
+    let installed = if FAIL_INSTALLED_VERIFICATION.with(std::cell::Cell::get) {
+        Err("injected installed-copy verification failure".to_owned())
+    } else {
+        installed
+    };
+    if !matches!(&installed, Ok((v, d)) if *v == version && *d == digest) {
+        // Never report success for an unverified install: move it aside and put the originals
+        // back. If any step of that fails, name where each state now is.
+        let failed_copy = database_path.with_file_name(format!(
+            "{}.failed-restore-{suffix}",
+            file_name_text(database_path)
         ));
+        let mut problems = Vec::new();
+        if let Err(error) = std::fs::rename(database_path, &failed_copy) {
+            problems.push(format!("could not move the failed copy aside: {error}"));
+        } else {
+            for (original, moved) in preserved.iter().rev() {
+                if let Err(error) = std::fs::rename(moved, original) {
+                    problems.push(format!(
+                        "original {} is still at {}: {error}",
+                        original.display(),
+                        moved.display()
+                    ));
+                }
+            }
+        }
+        let reason = match &installed {
+            Ok(_) => "restored copy does not match the backup receipt".to_owned(),
+            Err(error) => format!("restored copy failed verification: {error}"),
+        };
+        return Err(refused(if problems.is_empty() {
+            format!(
+                "{reason}; the original database was put back and the failed copy is kept at {}",
+                failed_copy.display()
+            )
+        } else {
+            format!(
+                "{reason}; rollback is incomplete and needs manual recovery: {}",
+                problems.join("; ")
+            )
+        }));
     }
     Ok(RestoredDatabase {
         schema_version: version,
@@ -3068,8 +3266,20 @@ mod tests {
         let backups: Vec<_> = std::fs::read_dir(directory.path().join("schema-backups"))
             .expect("a schema 6 store must be backed up before it is upgraded")
             .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "sqlite3")
+            })
             .collect();
         assert_eq!(backups.len(), 1);
+        // Every backup is anchored by a receipt written from the source's own digest.
+        assert!(schema_backup_receipt_path(&backups[0]).exists());
+        assert_eq!(
+            verify_schema_backup(&path, &backups[0])
+                .unwrap()
+                .schema_version,
+            6
+        );
         let backup =
             Connection::open_with_flags(&backups[0], rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .unwrap();
@@ -3213,6 +3423,161 @@ mod tests {
         assert_eq!(
             schema_version(&open_database(&path).unwrap()).unwrap(),
             CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    /// Changes a backup with ordinary SQL so it stays a structurally valid SQLite database.
+    fn alter_backup_logically(backup: &Path) {
+        let connection = Connection::open(backup).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER datasets_prevent_update;
+                 UPDATE datasets SET status = 'BLOCKED';",
+            )
+            .unwrap();
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            integrity, "ok",
+            "the altered backup must still be valid SQLite"
+        );
+    }
+
+    #[test]
+    fn gate_adversarial_tamper_schema_restore_rejects_a_logically_altered_valid_backup() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (path, writer) = populated_v6_store(directory.path());
+        drop(writer);
+        let upgraded = open_database(&path).unwrap();
+        let live_digest = database_content_sha256(&upgraded).unwrap();
+        drop(upgraded);
+        let backup = list_schema_backups(&path).unwrap().remove(0);
+        alter_backup_logically(&backup);
+
+        assert!(
+            restore_schema_backup(&path, &backup).is_err(),
+            "a backup whose content no longer matches what was backed up must not be restored"
+        );
+        assert!(matches!(
+            verify_schema_backup(&path, &backup),
+            Err(PersistenceError::SchemaBackupUnverified(_))
+        ));
+        let live = Connection::open(&path).unwrap();
+        assert_eq!(schema_version(&live).unwrap(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(database_content_sha256(&live).unwrap(), live_digest);
+    }
+
+    /// An upgraded store with one receipted backup; returns the store path, backup, and the live
+    /// schema 7 digest.
+    fn upgraded_with_backup(directory: &Path) -> (std::path::PathBuf, std::path::PathBuf, String) {
+        let (path, writer) = populated_v6_store(directory);
+        drop(writer);
+        let upgraded = open_database(&path).unwrap();
+        let live_digest = database_content_sha256(&upgraded).unwrap();
+        drop(upgraded);
+        let backup = list_schema_backups(&path).unwrap().remove(0);
+        (path, backup, live_digest)
+    }
+
+    fn assert_live_unchanged(path: &Path, live_digest: &str) {
+        let live = Connection::open(path).unwrap();
+        assert_eq!(schema_version(&live).unwrap(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(database_content_sha256(&live).unwrap(), live_digest);
+    }
+
+    #[test]
+    fn gate_adversarial_tamper_schema_restore_requires_a_well_formed_matching_receipt() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (path, backup, live_digest) = upgraded_with_backup(directory.path());
+        let receipt_path = schema_backup_receipt_path(&backup);
+        let receipt = std::fs::read_to_string(&receipt_path).unwrap();
+        let parsed: SchemaBackupReceipt = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(parsed.schema_version, 6);
+        assert_eq!(parsed.source_database_file_name, "research.sqlite3");
+
+        let mut wrong_name = parsed.clone();
+        wrong_name.backup_file_name = "another-backup.sqlite3".into();
+        let mut wrong_digest = parsed.clone();
+        wrong_digest.content_sha256 = "0".repeat(64);
+        let cases = [
+            ("missing", None),
+            (
+                "malformed",
+                Some("{\"receipt_version\": 1, \"truncated".to_owned()),
+            ),
+            (
+                "unknown field",
+                Some(receipt.replacen('{', "{\"trusted\": true,", 1)),
+            ),
+            (
+                "other backup",
+                Some(serde_json::to_string(&wrong_name).unwrap()),
+            ),
+            (
+                "other digest",
+                Some(serde_json::to_string(&wrong_digest).unwrap()),
+            ),
+        ];
+        for (case, content) in cases {
+            match &content {
+                None => std::fs::remove_file(&receipt_path).unwrap(),
+                Some(text) => std::fs::write(&receipt_path, text).unwrap(),
+            }
+            assert!(
+                matches!(
+                    verify_schema_backup(&path, &backup),
+                    Err(PersistenceError::SchemaBackupUnverified(_))
+                ),
+                "{case}"
+            );
+            assert!(restore_schema_backup(&path, &backup).is_err(), "{case}");
+            assert_live_unchanged(&path, &live_digest);
+        }
+
+        // With its original receipt back, the same backup verifies and restores.
+        std::fs::write(&receipt_path, &receipt).unwrap();
+        assert_eq!(
+            restore_schema_backup(&path, &backup)
+                .unwrap()
+                .content_sha256,
+            parsed.content_sha256
+        );
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_failed_final_restore_check_puts_the_original_back() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (path, backup, live_digest) = upgraded_with_backup(directory.path());
+        FAIL_INSTALLED_VERIFICATION.with(|fail| fail.set(true));
+        let result = restore_schema_backup(&path, &backup);
+        FAIL_INSTALLED_VERIFICATION.with(|fail| fail.set(false));
+        let reason = match result {
+            Err(PersistenceError::SchemaRestoreFailed(reason)) => reason,
+            other => panic!("a restore that failed its final check reported {other:?}"),
+        };
+        assert!(
+            reason.contains("original database was put back"),
+            "{reason}"
+        );
+        assert_live_unchanged(&path, &live_digest);
+        let leftovers: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            leftovers
+                .iter()
+                .any(|name| name.contains(".failed-restore-")),
+            "{leftovers:?}"
+        );
+        assert!(
+            !leftovers.iter().any(|name| name.contains(".pre-restore-")),
+            "{leftovers:?}"
+        );
+        assert!(
+            !leftovers.iter().any(|name| name.ends_with(".tmp")),
+            "{leftovers:?}"
         );
     }
 
