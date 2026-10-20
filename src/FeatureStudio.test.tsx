@@ -302,4 +302,28 @@ describe("gate feature_studio_ui", () => {
     expect(await screen.findByText(/No READY verified dataset is registered/)).toBeTruthy();
     expect((screen.getByRole("button", { name: "Validate and preview" }) as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("names why each registered dataset is unavailable when none is eligible", async () => {
+    const blocked: FeatureInputCandidate = { ...inputs[1], dataset_id: `ds_${"9".repeat(64)}`, status: "BLOCKED", reason: "dataset is BLOCKED: 3 unclassified gap bars", source_file_name: "gappy-fixture.csv" };
+    mockBackend({ inputs: [blocked] });
+    render(<FeatureStudio />);
+    expect(await screen.findByText(/No READY verified dataset is registered/)).toBeTruthy();
+    expect(screen.getByText(/gappy-fixture.csv: dataset is BLOCKED: 3 unclassified gap bars/)).toBeTruthy();
+  });
+
+  it("selects a dataset that became READY after Refresh so a preview can start", async () => {
+    const backend: Backend = { inputs: [], preview: (request) => { requests.push(request); return previewSession(); } };
+    const requests: FeatureSetRequest[] = [];
+    mockBackend(backend);
+    render(<FeatureStudio />);
+    expect(await screen.findByText(/No READY verified dataset is registered/)).toBeTruthy();
+    backend.inputs = inputs;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect((await screen.findByLabelText("Target dataset") as HTMLSelectElement).value).toBe(readyDataset);
+    expect((screen.getByLabelText("Target series") as HTMLSelectElement).value).toBe("EURUSD.m\u0000H1");
+    await addThreeBarSma();
+    fireEvent.click(screen.getByRole("button", { name: "Validate and preview" }));
+    expect(await screen.findByText(/FEATURE PREVIEW · NOT YET REGISTERED/)).toBeTruthy();
+    expect(requests[0].target).toEqual({ dataset_id: readyDataset, symbol: "EURUSD.m", timeframe: "H1" });
+  });
 });

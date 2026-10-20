@@ -110,8 +110,9 @@ impl DataGroundState {
             .ok_or_else(|| "selected source token is invalid or expired".to_owned())
     }
 
+    /// Stands in for the native file picker in headless IPC tests.
     #[cfg(test)]
-    fn select_for_test(&self, path: PathBuf) -> SelectedSource {
+    pub(crate) fn select_for_test(&self, path: PathBuf) -> SelectedSource {
         self.insert_selected_source(path).unwrap()
     }
 }

@@ -8,11 +8,15 @@ function Invoke-LoggedNativeCommand {
     # Windows PowerShell 5.1 turns each stderr line of a native command into an ErrorRecord. Under
     # ErrorActionPreference=Stop the first record terminates the pipeline before the native exit code
     # is read. Success is therefore decided from $LASTEXITCODE, while stdout and stderr are both logged.
+    # Stderr records are written as their native text so informational lines (for example Tauri's "Info ..."
+    # notices) are not displayed or logged with a PowerShell NativeCommandError banner.
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
         $global:LASTEXITCODE = $null
-        & $Command | Tee-Object -FilePath $LogPath -Append | Out-Host
+        & $Command |
+            ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ } } |
+            Tee-Object -FilePath $LogPath -Append | Out-Host
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }

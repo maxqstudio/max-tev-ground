@@ -187,11 +187,22 @@ export default function FeatureStudio() {
     return sets;
   }, []);
 
+  // Keeps the chosen target when it is still eligible; otherwise selects the first eligible dataset and series so the
+  // form state matches what the target selects display.
+  const selectDefaultTarget = useCallback((candidates: FeatureInputCandidate[], currentDatasetId: string) => {
+    if (candidates.some((item) => item.eligible && item.dataset_id === currentDatasetId)) return;
+    const firstEligible = candidates.find((item) => item.eligible);
+    const firstSeries = firstEligible?.series[0];
+    setTargetDatasetId(firstEligible?.dataset_id ?? "");
+    setTargetSeries(firstSeries ? seriesValue(firstSeries.symbol, firstSeries.timeframe) : "");
+  }, []);
+
   const refreshInputs = useCallback(async () => {
     const candidates = await invoke<FeatureInputCandidate[]>("list_feature_inputs");
     setInputs(candidates);
+    selectDefaultTarget(candidates, targetDatasetId);
     return candidates;
-  }, []);
+  }, [selectDefaultTarget, targetDatasetId]);
 
   useEffect(() => {
     let current = true;
@@ -207,12 +218,7 @@ export default function FeatureStudio() {
       setInputs(candidates);
       setFeatureSets(sets);
       setAttempts(history);
-      const firstEligible = candidates.find((item) => item.eligible);
-      if (firstEligible) {
-        setTargetDatasetId(firstEligible.dataset_id);
-        const firstSeries = firstEligible.series[0];
-        if (firstSeries) setTargetSeries(seriesValue(firstSeries.symbol, firstSeries.timeframe));
-      }
+      selectDefaultTarget(candidates, "");
       if (active?.state === "PREPARED") {
         setPreview(active.session);
         setActiveJobId(active.session.jobId);
@@ -229,7 +235,7 @@ export default function FeatureStudio() {
       setBusy(null);
     });
     return () => { current = false; };
-  }, []);
+  }, [selectDefaultTarget]);
 
   useEffect(() => {
     if (!previewPending || !activeJobId) return;
@@ -271,6 +277,7 @@ export default function FeatureStudio() {
 
   const targetCandidate = inputs.find((item) => item.dataset_id === targetDatasetId);
   const locked = busy !== null || preview !== null || previewPending;
+  const unavailableReasons = inputs.filter((item) => !item.eligible).map((item) => <p className="form-hint" key={item.dataset_id}><AlertTriangle size={13} /> {item.source_file_name ?? item.dataset_id}: {item.reason}</p>);
 
   function addFeature() {
     if (!registry) return;
@@ -441,7 +448,10 @@ export default function FeatureStudio() {
           {busy === "loading" && !registry ? (
             <div className="empty-registry"><span className="loading-indicator" /> Verifying registered datasets…</div>
           ) : eligibleInputs.length === 0 ? (
-            <div className="empty-registry"><SlidersHorizontal size={18} /><span>No READY verified dataset is registered. Import and verify one in Data Ground first.</span></div>
+            <>
+              <div className="empty-registry"><SlidersHorizontal size={18} /><span>No READY verified dataset is registered. Import and verify one in Data Ground first.</span></div>
+              {unavailableReasons}
+            </>
           ) : (
             <fieldset className="form-fieldset" disabled={locked}>
               <div className="form-grid">
@@ -458,7 +468,7 @@ export default function FeatureStudio() {
                 </label>
               </div>
               {targetCandidate && <p className="form-hint">Source <code>{targetCandidate.source_id}</code> · {targetCandidate.broker} / {targetCandidate.server} · dataset <code title={targetCandidate.dataset_id}>{shortHash(targetCandidate.dataset_id)}</code></p>}
-              {inputs.filter((item) => !item.eligible).map((item) => <p className="form-hint" key={item.dataset_id}><AlertTriangle size={13} /> {item.source_file_name ?? item.dataset_id}: {item.reason}</p>)}
+              {unavailableReasons}
             </fieldset>
           )}
         </section>

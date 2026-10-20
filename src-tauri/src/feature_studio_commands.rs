@@ -773,4 +773,270 @@ mod tests {
         .unwrap();
         assert_eq!(attempts[0]["diagnostic_code"], "INVALID_REQUEST");
     }
+
+    /// The desktop shell as `lib::run` assembles it, over `root` instead of the OS app-data directory.
+    fn desktop_app(root: &Path) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRuntime>) {
+        let data = DataGroundState::open(root).unwrap();
+        let features = FeatureStudioState::open(root, data.store()).unwrap();
+        let app = register_commands(mock_builder())
+            .manage(data)
+            .manage(features)
+            .build(mock_context(noop_assets()))
+            .expect("mock Tauri runtime should build");
+        let webview = WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview should build");
+        (app, webview)
+    }
+
+    /// Name and exact bytes of every file in a snapshot directory (fixtures are small).
+    fn file_contents(directory: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut files: Vec<_> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = fs::read(&path).unwrap();
+                (
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    bytes,
+                )
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// Owner workflow smoke over the IPC commands the desktop UI calls, on a labeled synthetic
+    /// fixture in isolated storage: import, confirm, compute, freeze, inspect, restart, reuse,
+    /// cancel, and fail closed on a tampered source.
+    #[test]
+    fn gate_feature_studio_ui_ipc_end_to_end_desktop_workflow_survives_restart() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().join("app-data");
+        let source = directory.path().join("synthetic-fixture-e2e.csv");
+        fs::write(&source, synthetic_csv()).unwrap();
+        let source_bytes = fs::read(&source).unwrap();
+        let import_request = serde_json::json!({
+            "mapping": {"timestamp": "timestamp", "open": "open", "high": "high", "low": "low",
+                        "close": "close", "volume": "volume", "symbol": "symbol", "timeframe": "timeframe"},
+            "timestamp_semantics": "BAR_OPENS_AT",
+            "naive_timestamp_offset_minutes": 0,
+            "default_symbol": "EURUSD.m",
+            "default_timeframe": "H1",
+            "default_market_role": "TARGET",
+            "market_roles": {"GBPUSD.m": "REFERENCE"},
+            "source_id": "synthetic-fixture:e2e",
+            "broker": "SYNTHETIC-FIXTURE",
+            "server": "SYNTHETIC-FIXTURE",
+            "delimiter": "COMMA",
+            "calendar": {"kind": "CONTINUOUS"},
+            "quotas": {"max_source_bytes": 1_000_000, "max_records": 1_000}
+        });
+
+        let (dataset_id, feature_set_id, snapshot_files) = {
+            let (app, webview) = desktop_app(&root);
+            // Step 1: choose a source and preview the import; nothing is registered yet.
+            let token = app
+                .state::<DataGroundState>()
+                .select_for_test(source.clone())
+                .selection_id;
+            let inspected = ipc(
+                &webview,
+                "inspect_selected_source",
+                serde_json::json!({"selectionId": token, "maxSourceBytes": 1_000_000, "delimiter": "COMMA"}),
+            )
+            .unwrap();
+            assert_eq!(inspected["inspection"]["headers"][0], "timestamp");
+            let import = ipc(
+                &webview,
+                "preview_data_import",
+                serde_json::json!({"jobId": JOB_ID, "selectionId": token, "request": import_request}),
+            )
+            .unwrap();
+            assert_eq!(import["preview"]["status"], "READY");
+            assert_eq!(import["preview"]["bar_count"], 60);
+            assert!(ipc(&webview, "list_datasets", serde_json::json!({}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty());
+
+            // Step 2: confirm; the dataset is READY with verified lineage hashes.
+            let imported = ipc(
+                &webview,
+                "confirm_data_import",
+                serde_json::json!({"jobId": JOB_ID}),
+            )
+            .unwrap();
+            assert_eq!(imported["disposition"], "IMPORTED");
+            assert_eq!(imported["status"], "READY");
+            let dataset_id = imported["dataset_id"].as_str().unwrap().to_owned();
+            let dataset = ipc(
+                &webview,
+                "inspect_dataset",
+                serde_json::json!({"datasetId": dataset_id}),
+            )
+            .unwrap();
+            assert_eq!(dataset["status"], "READY");
+            assert_eq!(dataset["integrity"]["raw_source_valid"], true);
+            assert_eq!(dataset["integrity"]["canonical_parquet_valid"], true);
+            let snapshot_files = file_contents(&root.join("datasets").join(&dataset_id));
+
+            // Step 3: Feature Studio offers the READY dataset as an eligible input.
+            let inputs = ipc(&webview, "list_feature_inputs", serde_json::json!({})).unwrap();
+            assert_eq!(inputs.as_array().unwrap().len(), 1);
+            assert_eq!(inputs[0]["dataset_id"], dataset_id.as_str());
+            assert_eq!(inputs[0]["eligible"], true);
+
+            // Steps 4-5: configure SMA and a reference RSI, then preview computed rows.
+            let preview = ipc(
+                &webview,
+                "preview_feature_set",
+                serde_json::json!({"jobId": OTHER_JOB_ID, "request": request_json(&dataset_id)}),
+            )
+            .unwrap();
+            assert_eq!(preview["preview"]["manifest"]["status"], "READY");
+            assert_eq!(preview["preview"]["manifest"]["row_count"], 30);
+            let rows = preview["preview"]["sample_rows"].as_array().unwrap();
+            assert_eq!(rows.len(), PREVIEW_ROWS);
+            assert!(rows
+                .iter()
+                .any(|row| row["features"][0]["status"] == "READY"
+                    && row["features"][0]["values"][0].is_f64()));
+            assert!(ipc(&webview, "list_feature_sets", serde_json::json!({}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty());
+
+            // Step 6: confirm materializes one immutable feature set.
+            let committed = ipc(
+                &webview,
+                "confirm_feature_set",
+                serde_json::json!({"jobId": OTHER_JOB_ID}),
+            )
+            .unwrap();
+            assert_eq!(committed["disposition"], "MATERIALIZED");
+            assert_eq!(committed["status"], "READY");
+            let feature_set_id = committed["feature_set_id"].as_str().unwrap().to_owned();
+
+            // Step 7: list and inspect the registered set.
+            let catalog = ipc(&webview, "list_feature_sets", serde_json::json!({})).unwrap();
+            assert_eq!(catalog.as_array().unwrap().len(), 1);
+            assert_eq!(catalog[0]["status"], "READY");
+            let inspected = ipc(
+                &webview,
+                "inspect_feature_set",
+                serde_json::json!({"featureSetId": feature_set_id}),
+            )
+            .unwrap();
+            assert_eq!(inspected["integrity"]["output_valid"], true);
+            assert_eq!(inspected["integrity"]["lineage_valid"], true);
+            assert_eq!(
+                inspected["manifest"]["lineage"][0]["source_id"],
+                "synthetic-fixture:e2e"
+            );
+            (dataset_id, feature_set_id, snapshot_files)
+        };
+
+        // Step 8: close and reopen the app over the same storage; state persists truthfully.
+        let (app, webview) = desktop_app(&root);
+        let datasets = ipc(&webview, "list_datasets", serde_json::json!({})).unwrap();
+        assert_eq!(datasets.as_array().unwrap().len(), 1);
+        assert_eq!(datasets[0]["status"], "READY");
+        let catalog = ipc(&webview, "list_feature_sets", serde_json::json!({})).unwrap();
+        assert_eq!(catalog.as_array().unwrap().len(), 1);
+        assert_eq!(catalog[0]["feature_set_id"], feature_set_id.as_str());
+        assert_eq!(catalog[0]["status"], "READY");
+        assert!(
+            ipc(&webview, "get_active_feature_job", serde_json::json!({}))
+                .unwrap()
+                .is_null()
+        );
+        assert!(
+            ipc(&webview, "get_active_data_import", serde_json::json!({}))
+                .unwrap()
+                .is_null()
+        );
+        let attempts = ipc(&webview, "list_feature_attempts", serde_json::json!({})).unwrap();
+        assert_eq!(attempts[0]["status"], "MATERIALIZED");
+        let imports = ipc(&webview, "list_import_attempts", serde_json::json!({})).unwrap();
+        assert_eq!(imports[0]["status"], "IMPORTED");
+
+        // The same request after restart reuses the registered identity.
+        ipc(
+            &webview,
+            "preview_feature_set",
+            serde_json::json!({"jobId": JOB_ID, "request": request_json(&dataset_id)}),
+        )
+        .unwrap();
+        let reused = ipc(
+            &webview,
+            "confirm_feature_set",
+            serde_json::json!({"jobId": JOB_ID}),
+        )
+        .unwrap();
+        assert_eq!(reused["disposition"], "REUSED");
+        assert_eq!(reused["feature_set_id"], feature_set_id.as_str());
+
+        // Cancellation registers nothing and leaves no staged output.
+        let state = app.state::<FeatureStudioState>();
+        let worker = state.begin_preview(OTHER_JOB_ID).unwrap();
+        assert_eq!(
+            ipc(
+                &webview,
+                "cancel_feature_job",
+                serde_json::json!({"jobId": OTHER_JOB_ID})
+            )
+            .unwrap(),
+            "CANCELLATION_REQUESTED"
+        );
+        let request: FeatureSetRequest = serde_json::from_value(request_json(&dataset_id)).unwrap();
+        let cancelled = worker
+            .store
+            .prepare(&request, &worker.cancel, &worker.progress);
+        assert!(matches!(cancelled, Err(FeatureError::Cancelled)));
+        assert!(state.finish_preview(OTHER_JOB_ID, cancelled).is_err());
+        assert_eq!(
+            fs::read_dir(worker.store.staging_directory_for_tests())
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            ipc(&webview, "list_feature_sets", serde_json::json!({}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Accepted source snapshot and the original file are byte-identical after the workflow.
+        let dataset_directory = root.join("datasets").join(&dataset_id);
+        assert!(file_contents(&dataset_directory) == snapshot_files);
+        assert!(fs::read(&source).unwrap() == source_bytes);
+
+        // A tampered source is blocked with a diagnostic naming the dataset.
+        let bars = dataset_directory.join("bars.parquet");
+        let mut bytes = fs::read(&bars).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0x5a;
+        fs::write(&bars, bytes).unwrap();
+        let inputs = ipc(&webview, "list_feature_inputs", serde_json::json!({})).unwrap();
+        assert_eq!(inputs[0]["eligible"], false);
+        assert!(!inputs[0]["reason"].as_str().unwrap().is_empty());
+        let blocked = ipc(
+            &webview,
+            "preview_feature_set",
+            serde_json::json!({"jobId": JOB_ID, "request": request_json(&dataset_id)}),
+        )
+        .unwrap_err();
+        assert!(
+            blocked.as_str().unwrap().contains(&dataset_id),
+            "diagnostic must name the dataset: {blocked}"
+        );
+        let catalog = ipc(&webview, "list_feature_sets", serde_json::json!({})).unwrap();
+        assert_eq!(catalog[0]["status"], "QUARANTINED");
+    }
 }
