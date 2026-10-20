@@ -84,7 +84,7 @@ impl FeatureProgress {
         }
     }
 
-    fn set_phase(&self, phase: ProgressPhase, total_rows: u64) {
+    pub(crate) fn set_phase(&self, phase: ProgressPhase, total_rows: u64) {
         let value = match phase {
             ProgressPhase::Queued => 0,
             ProgressPhase::VerifyingInputs => 1,

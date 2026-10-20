@@ -128,6 +128,7 @@ interface Backend {
   preview?: (request: FeatureSetRequest) => FeaturePreviewSession;
   confirm?: () => FeatureCommitResult;
   listSets?: () => FeatureSetCatalogEntry[];
+  inspect?: () => FeatureSetCatalogEntry | null;
   cancel?: () => string;
   calls?: string[];
 }
@@ -141,6 +142,7 @@ function mockBackend(backend: Backend) {
       case "list_feature_inputs": return backend.inputs ?? inputs;
       case "list_feature_sets": return backend.listSets?.() ?? [];
       case "list_feature_attempts": return [];
+      case "inspect_feature_set": return backend.inspect?.() ?? null;
       case "get_active_feature_job": return backend.active?.() ?? null;
       case "preview_feature_set": return backend.preview?.(args.request as FeatureSetRequest);
       case "confirm_feature_set": return backend.confirm?.();
@@ -269,6 +271,29 @@ describe("gate feature_studio_ui", () => {
     fireEvent.click(screen.getByRole("button", { name: "Validate and preview" }));
     expect(await screen.findByText(/period must be a whole number between 1 and 500/)).toBeTruthy();
     expect(calls).not.toContain("preview_feature_set");
+  });
+
+  it("sends the input-row bound as one aggregate quota and shows a source-revoked set as QUARANTINED", async () => {
+    const requests: FeatureSetRequest[] = [];
+    const revoked: FeatureSetCatalogEntry = {
+      ...catalogEntry(),
+      status: "QUARANTINED",
+      integrity: { manifest_valid: true, output_valid: true, lineage_valid: false },
+      diagnostic: `source dataset ${readyDataset} failed snapshot verification: canonical bars digest mismatch`,
+    };
+    mockBackend({ preview: (request) => { requests.push(request); return previewSession(); }, listSets: () => [revoked], inspect: () => revoked });
+    render(<FeatureStudio />);
+    await addThreeBarSma();
+    fireEvent.change(screen.getByLabelText("Max total input rows (all datasets)"), { target: { value: "156" } });
+    fireEvent.click(screen.getByRole("button", { name: "Validate and preview" }));
+    expect(await screen.findByText(/FEATURE PREVIEW · NOT YET REGISTERED/)).toBeTruthy();
+    expect(requests[0].quotas.max_input_rows).toBe(156);
+
+    const catalogue = screen.getByRole("region", { name: "Feature-set catalogue" });
+    expect(within(catalogue).getByText("QUARANTINED")).toBeTruthy();
+    fireEvent.click(within(catalogue).getByRole("button", { name: /Inspect/ }));
+    expect(await screen.findByText("Dataset lineage: mismatch")).toBeTruthy();
+    expect(screen.getByText(/failed snapshot verification: canonical bars digest mismatch/)).toBeTruthy();
   });
 
   it("explains that a READY verified dataset is required when none exists", async () => {

@@ -1077,3 +1077,303 @@ fn gate_input_authority_feature_store_opens_only_beside_an_existing_dataset_regi
         Err(FeatureError::UnsafeStorePath)
     ));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Control Room audit repairs (PR #6 review 5579914800)
+
+/// Second READY dataset: GBPUSD.m H1 (48 bars) only.
+fn second_dataset(fixture: &Fixture, name: &str) -> String {
+    let rows = series(
+        "GBPUSD.m",
+        Timeframe::H1,
+        "2024-01-01T00:00:00Z",
+        48,
+        2.5,
+        false,
+    );
+    fixture.import(name, &rows, CalendarPolicy::Continuous)
+}
+
+fn flip_middle_byte(path: &std::path::Path) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0x5a;
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn remove_file(path: &std::path::Path) {
+    std::fs::remove_file(path).unwrap();
+}
+
+fn not_usable_status(result: Result<std::path::PathBuf, FeatureError>) -> Option<String> {
+    match result {
+        Err(error) if error.code() == "FEATURE_SET_NOT_USABLE" => {
+            Some(error.to_string().rsplit(' ').next().unwrap().to_owned())
+        }
+        _ => None,
+    }
+}
+
+fn assert_ready_and_consumable(fixture: &Fixture, id: &str) {
+    let entry = fixture.store().inspect_feature_set(id).unwrap().unwrap();
+    assert_eq!(entry.status, FeatureSetStatus::Ready);
+    assert!(entry.integrity.lineage_valid);
+    assert!(entry.diagnostic.is_none());
+    let catalog = fixture
+        .store()
+        .list_feature_sets(&AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].status, FeatureSetStatus::Ready);
+    let output = fixture.store().output_path(id).unwrap();
+    assert_eq!(
+        output,
+        std::fs::canonicalize(fixture.root.join("feature-sets"))
+            .unwrap()
+            .join(id)
+            .join("features.parquet")
+    );
+    assert_eq!(
+        file_sha256(&output),
+        entry.manifest.as_ref().unwrap().output_sha256
+    );
+}
+
+#[test]
+fn gate_recovery_and_tamper_source_tamper_after_registration_revokes_readiness() {
+    type Tamper = fn(&std::path::Path);
+    let cases: [(&str, &str, Tamper); 5] = [
+        ("bars.parquet", "modified canonical bars", flip_middle_byte),
+        ("bars.parquet", "missing canonical bars", remove_file),
+        ("raw-source.csv", "modified raw source", flip_middle_byte),
+        ("raw-source.csv", "missing raw source", remove_file),
+        (
+            "manifest.json",
+            "modified dataset manifest",
+            flip_middle_byte,
+        ),
+    ];
+    for (file_name, label, tamper) in cases {
+        let mut fixture = Fixture::new();
+        let dataset = standard_dataset(&fixture, "post-registration-tamper");
+        let id = commit(&fixture, &standard_request(&dataset));
+        assert_ready_and_consumable(&fixture, &id);
+
+        tamper(&fixture.dataset_dir(&dataset).join(file_name));
+
+        let entry = fixture.store().inspect_feature_set(&id).unwrap().unwrap();
+        assert_eq!(entry.status, FeatureSetStatus::Quarantined, "{label}");
+        assert!(!entry.integrity.lineage_valid, "{label}");
+        // The feature set's own manifest and output are untouched: only source lineage fails.
+        assert!(entry.integrity.manifest_valid, "{label}");
+        assert!(entry.integrity.output_valid, "{label}");
+        assert!(
+            entry.diagnostic.as_deref().unwrap_or("").contains(&dataset),
+            "{label}"
+        );
+        let catalog = fixture
+            .store()
+            .list_feature_sets(&AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(catalog[0].status, FeatureSetStatus::Quarantined, "{label}");
+        assert!(!catalog[0].integrity.lineage_valid, "{label}");
+        assert_eq!(
+            not_usable_status(fixture.store().output_path(&id)).as_deref(),
+            Some("QUARANTINED"),
+            "{label}"
+        );
+        assert!(
+            matches!(
+                fixture.prepare(&standard_request(&dataset)),
+                Err(FeatureError::InputIntegrity { .. })
+            ),
+            "{label}"
+        );
+        // Readiness stays revoked across a registry restart.
+        fixture.reopen().unwrap();
+        let entry = fixture.store().inspect_feature_set(&id).unwrap().unwrap();
+        assert_eq!(entry.status, FeatureSetStatus::Quarantined, "{label}");
+    }
+}
+
+#[test]
+fn gate_recovery_and_tamper_unchanged_source_keeps_registered_set_ready_and_consumable() {
+    let mut fixture = Fixture::new();
+    let dataset = standard_dataset(&fixture, "unchanged-source");
+    let id = commit(&fixture, &standard_request(&dataset));
+    let bars = fixture.dataset_dir(&dataset).join("bars.parquet");
+    let before = file_sha256(&bars);
+    assert_ready_and_consumable(&fixture, &id);
+    assert_ready_and_consumable(&fixture, &id);
+    fixture.reopen().unwrap();
+    assert_ready_and_consumable(&fixture, &id);
+    assert_eq!(file_sha256(&bars), before);
+}
+
+#[test]
+fn gate_feature_materialization_only_ready_feature_sets_cross_the_downstream_boundary() {
+    let fixture = Fixture::new();
+    let dataset = standard_dataset(&fixture, "blocked-boundary");
+    let prepared = fixture
+        .prepare(&request(
+            selector(&dataset, "EURUSD.m", "H1"),
+            vec![
+                target_feature("sma_3", "SMA", period(3)),
+                target_feature("sma_100", "SMA", period(100)),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(prepared.manifest.status, FeatureSetStatus::Blocked);
+    let id = fixture
+        .store()
+        .commit_prepared(prepared)
+        .unwrap()
+        .feature_set_id;
+    assert_eq!(
+        fixture
+            .store()
+            .inspect_feature_set(&id)
+            .unwrap()
+            .unwrap()
+            .status,
+        FeatureSetStatus::Blocked
+    );
+    assert_eq!(
+        not_usable_status(fixture.store().output_path(&id)).as_deref(),
+        Some("BLOCKED")
+    );
+    let unknown = format!("fs_{}", "0".repeat(64));
+    assert_eq!(
+        not_usable_status(fixture.store().output_path(&unknown)).as_deref(),
+        Some("NOT_REGISTERED")
+    );
+}
+
+#[test]
+fn gate_recovery_and_tamper_catalogue_source_checks_do_not_collide_with_input_listing() {
+    let fixture = Fixture::new();
+    let dataset = standard_dataset(&fixture, "concurrent-verification");
+    let id = commit(&fixture, &standard_request(&dataset));
+    std::thread::scope(|scope| {
+        let listing = scope.spawn(|| {
+            for _ in 0..20 {
+                let candidates = fixture
+                    .store()
+                    .list_input_candidates(&AtomicBool::new(false))
+                    .unwrap();
+                assert!(candidates[0].eligible);
+            }
+        });
+        for _ in 0..20 {
+            let entry = fixture.store().inspect_feature_set(&id).unwrap().unwrap();
+            assert_eq!(entry.status, FeatureSetStatus::Ready);
+            let catalog = fixture
+                .store()
+                .list_feature_sets(&AtomicBool::new(false))
+                .unwrap();
+            assert_eq!(catalog[0].status, FeatureSetStatus::Ready);
+        }
+        listing.join().unwrap();
+    });
+}
+
+#[test]
+fn gate_resource_controls_catalogue_source_hashing_honours_cancellation() {
+    let fixture = Fixture::new();
+    let dataset = standard_dataset(&fixture, "cancel-source-hash");
+    commit(&fixture, &standard_request(&dataset));
+    // A large raw source keeps Data Ground hashing long enough to cancel it mid-file.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(fixture.dataset_dir(&dataset).join("raw-source.csv"))
+        .unwrap()
+        .set_len(128 * 1024 * 1024)
+        .unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let signal = Arc::clone(&cancel);
+    let cancellation = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        signal.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let result = fixture.store().list_feature_sets(&cancel);
+    cancellation.join().unwrap();
+    assert!(matches!(result, Err(FeatureError::Cancelled)));
+}
+
+#[test]
+fn gate_resource_controls_input_row_quota_is_aggregate_across_unique_datasets() {
+    let fixture = Fixture::new();
+    // 108 bars: EURUSD.m H1 48 + EURUSD.m H4 12 + GBPUSD.m H1 48.
+    let first = standard_dataset(&fixture, "aggregate-first");
+    // 48 bars.
+    let second = second_dataset(&fixture, "aggregate-second");
+
+    // Single input: the quota bounds that dataset's bars.
+    let mut single = standard_request(&first);
+    single.quotas.max_input_rows = 108;
+    let prepared = fixture.prepare(&single).unwrap();
+    fixture.store().discard_prepared(prepared).unwrap();
+    single.quotas.max_input_rows = 107;
+    assert!(matches!(
+        fixture.prepare(&single),
+        Err(FeatureError::ResourceQuota(ref message)) if message.contains("108")
+    ));
+
+    // Two physical datasets, each referenced more than once: 108 + 48 = 156 aggregate rows.
+    let multi = |max_input_rows: u64| {
+        let mut request = request(
+            selector(&first, "EURUSD.m", "H1"),
+            vec![
+                target_feature("sma_3", "SMA", period(3)),
+                reference_feature(
+                    "own_gbp",
+                    "EMA",
+                    period(4),
+                    selector(&first, "GBPUSD.m", "H1"),
+                    3600,
+                    0,
+                ),
+                reference_feature(
+                    "second_gbp_ema",
+                    "EMA",
+                    period(4),
+                    selector(&second, "GBPUSD.m", "H1"),
+                    3600,
+                    0,
+                ),
+                reference_feature(
+                    "second_gbp_sma",
+                    "SMA",
+                    period(3),
+                    selector(&second, "GBPUSD.m", "H1"),
+                    3600,
+                    0,
+                ),
+            ],
+        );
+        request.quotas.max_input_rows = max_input_rows;
+        request
+    };
+    for below_or_equal in [157, 156] {
+        let prepared = fixture.prepare(&multi(below_or_equal)).unwrap();
+        assert_eq!(prepared.manifest.identity.inputs.len(), 2);
+        fixture.store().discard_prepared(prepared).unwrap();
+    }
+    for above in [155, 109, 108] {
+        assert!(
+            matches!(
+                fixture.prepare(&multi(above)),
+                Err(FeatureError::ResourceQuota(ref message)) if message.contains("156")
+            ),
+            "max_input_rows {above}"
+        );
+    }
+    // The target-row quota is still enforced on its own.
+    let mut target = multi(156);
+    target.quotas.max_target_rows = 47;
+    assert!(matches!(
+        fixture.prepare(&target),
+        Err(FeatureError::ResourceQuota(ref message)) if message.contains("target")
+    ));
+    assert_eq!(fixture.staging_entries(), 0);
+}

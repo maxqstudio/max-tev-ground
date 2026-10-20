@@ -544,7 +544,7 @@ export default function FeatureStudio() {
           <fieldset className="form-fieldset" disabled={locked}>
             <div className="form-grid">
               <label className="form-field"><span>Max target rows</span><input type="number" value={bounds.maxTargetRows} onChange={(event) => setBounds({ ...bounds, maxTargetRows: event.target.value })} /></label>
-              <label className="form-field"><span>Max rows per input dataset</span><input type="number" value={bounds.maxInputRows} onChange={(event) => setBounds({ ...bounds, maxInputRows: event.target.value })} /></label>
+              <label className="form-field"><span>Max total input rows (all datasets)</span><input type="number" value={bounds.maxInputRows} onChange={(event) => setBounds({ ...bounds, maxInputRows: event.target.value })} /></label>
               <label className="form-field"><span>Max output size (MB)</span><input type="number" value={bounds.maxOutputMegabytes} onChange={(event) => setBounds({ ...bounds, maxOutputMegabytes: event.target.value })} /></label>
             </div>
           </fieldset>
@@ -566,7 +566,7 @@ export default function FeatureStudio() {
       <section className="data-section registry-section" aria-labelledby="feature-catalog-title">
         <div className="data-section-heading">
           <div className="step-badge">04</div>
-          <div><h2 id="feature-catalog-title">Feature-set catalogue</h2><p>Registered sets are immutable; every read rechecks the manifest, output digest, and dataset lineage.</p></div>
+          <div><h2 id="feature-catalog-title">Feature-set catalogue</h2><p>Registered sets are immutable; every read rechecks the manifest, output digest, and the current bytes of every source dataset.</p></div>
         </div>
         {featureSets.length === 0 ? <div className="empty-registry"><SlidersHorizontal size={18} /><span>No feature sets registered yet.</span></div> : (
           <div className="dataset-table-wrap">

@@ -348,6 +348,15 @@ impl DatasetStore {
         &self,
         dataset_id: &str,
     ) -> Result<Option<DatasetCatalogEntry>, DatasetStoreError> {
+        self.inspect_dataset_with_cancel(dataset_id, &AtomicBool::new(false))
+    }
+
+    /// [`DatasetStore::inspect_dataset`] whose snapshot hashing stops when `cancel` is set.
+    pub fn inspect_dataset_with_cancel(
+        &self,
+        dataset_id: &str,
+        cancel: &AtomicBool,
+    ) -> Result<Option<DatasetCatalogEntry>, DatasetStoreError> {
         validate_dataset_id(dataset_id)?;
         let _verification = self
             .verification_lock
@@ -357,9 +366,8 @@ impl DatasetStore {
             let connection = self.connection_guard()?;
             get_dataset_metadata(&connection, dataset_id)?
         };
-        let cancel = AtomicBool::new(false);
         metadata
-            .map(|item| self.verify_metadata(&item, &cancel))
+            .map(|item| self.verify_metadata(&item, cancel))
             .transpose()
     }
 

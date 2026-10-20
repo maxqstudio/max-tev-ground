@@ -79,6 +79,11 @@ pub enum FeatureError {
     Poisoned,
     #[error("feature set ID is invalid")]
     InvalidFeatureSetId,
+    #[error("feature set {feature_set_id} cannot be used downstream: status {status}")]
+    FeatureSetNotUsable {
+        feature_set_id: String,
+        status: String,
+    },
     #[error(transparent)]
     DatasetStore(#[from] DatasetStoreError),
     #[error(transparent)]
@@ -116,6 +121,7 @@ impl FeatureError {
             Self::UnsafeStorePath => "UNSAFE_STORE_PATH",
             Self::Poisoned => "STORE_UNAVAILABLE",
             Self::InvalidFeatureSetId => "INVALID_FEATURE_SET_ID",
+            Self::FeatureSetNotUsable { .. } => "FEATURE_SET_NOT_USABLE",
             Self::DatasetStore(_) => "DATASET_STORE_FAILURE",
             Self::Persistence(_) => "PERSISTENCE_FAILURE",
             Self::Parquet(_) | Self::Arrow(_) => "PARQUET_FAILURE",

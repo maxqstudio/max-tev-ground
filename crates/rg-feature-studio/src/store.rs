@@ -14,10 +14,13 @@ use std::{
 };
 
 use chrono::Utc;
-use rg_data_ground::{store::DatasetStore, DatasetStatus, SeriesSummary};
+use rg_data_ground::{
+    store::{DatasetStore, DatasetStoreError},
+    DataGroundError, DatasetManifest, DatasetStatus, SeriesSummary,
+};
 use rg_persistence::{
     clear_pending_feature_set_promotion, complete_pending_feature_set_promotion,
-    get_dataset_metadata, get_feature_set_metadata, list_feature_attempts, list_feature_set_inputs,
+    get_feature_set_metadata, list_feature_attempts, list_feature_set_inputs,
     list_feature_set_metadata_after, list_pending_feature_set_promotions, open_database,
     save_feature_attempt, save_pending_feature_set_promotion, FeatureAttemptRecord,
     FeatureSetInput, FeatureSetMetadata, PendingFeatureSetPromotion,
@@ -27,7 +30,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    engine::{self, FeatureProgress, PreviewRow, ResolvedInput},
+    engine::{self, FeatureProgress, PreviewRow, ProgressPhase, ResolvedInput},
     spec::{
         hex, is_sha256, validate_request, FeatureSetIdentity, FeatureSetManifest,
         FeatureSetRequest, FeatureSetStatus, FeatureSource, InputDatasetIdentity, InputLineage,
@@ -118,6 +121,49 @@ pub struct FeatureStore {
     feature_sets_directory: PathBuf,
     connection: Mutex<rusqlite::Connection>,
     operation_lock: Mutex<()>,
+    /// Serializes Feature Studio's Data Ground snapshot verification so catalogue checks, input
+    /// listing, and input resolution never contend for Data Ground's non-blocking verifier.
+    /// Lock order: `operation_lock`, then this lock; `connection` is never held across it.
+    source_verification: Mutex<()>,
+}
+
+/// Why a source dataset cannot be trusted as a feature input.
+#[derive(Clone)]
+enum SourceProblem {
+    Missing,
+    Integrity(String),
+    NotReady(String),
+}
+
+impl SourceProblem {
+    fn into_error(self, dataset_id: &str) -> FeatureError {
+        match self {
+            Self::Missing => FeatureError::InputMissing(dataset_id.into()),
+            Self::Integrity(reason) => FeatureError::InputIntegrity {
+                dataset_id: dataset_id.into(),
+                reason,
+            },
+            Self::NotReady(status) => FeatureError::InputNotReady {
+                dataset_id: dataset_id.into(),
+                status,
+            },
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::Missing => "is no longer registered".into(),
+            Self::Integrity(reason) => format!("failed snapshot verification: {reason}"),
+            Self::NotReady(status) => format!("is {status}, not READY"),
+        }
+    }
+}
+
+/// Data Ground snapshots re-verified during one store operation. Holding it keeps source
+/// verification serialized, and each dataset's bytes are hashed at most once per operation.
+struct SourceCheck<'a> {
+    _verification: MutexGuard<'a, ()>,
+    verified: BTreeMap<String, Result<DatasetManifest, SourceProblem>>,
 }
 
 impl FeatureStore {
@@ -139,6 +185,7 @@ impl FeatureStore {
             feature_sets_directory,
             connection: Mutex::new(open_database(database_path)?),
             operation_lock: Mutex::new(()),
+            source_verification: Mutex::new(()),
         };
         store.recover_pending_promotions()?;
         Ok(store)
@@ -154,6 +201,7 @@ impl FeatureStore {
         &self,
         cancel: &AtomicBool,
     ) -> Result<Vec<FeatureInputCandidate>, FeatureError> {
+        let _verification = self.source_verification_guard()?;
         let entries = self
             .datasets
             .list_datasets_with_progress(cancel, |_, _, _| {})?;
@@ -199,7 +247,9 @@ impl FeatureStore {
         progress: &FeatureProgress,
     ) -> Result<PreparedFeatureSet, FeatureError> {
         let validated = validate_request(request)?;
-        let inputs = self.resolve_inputs(&validated)?;
+        // Source snapshots are hashed while inputs resolve, so report that phase from the start.
+        progress.set_phase(ProgressPhase::VerifyingInputs, 0);
+        let inputs = self.resolve_inputs(&validated, cancel)?;
         let stage = self.staging_directory.join(Uuid::now_v7().to_string());
         fs::create_dir(&stage)?;
         let result = prepare_in_stage(&validated, &inputs, &stage, cancel, progress);
@@ -212,49 +262,32 @@ impl FeatureStore {
     fn resolve_inputs(
         &self,
         validated: &ValidatedRequest,
+        cancel: &AtomicBool,
     ) -> Result<BTreeMap<String, ResolvedInput>, FeatureError> {
         let mut inputs = BTreeMap::new();
-        for dataset_id in &validated.dataset_ids {
-            let entry = self
-                .datasets
-                .inspect_dataset(dataset_id)?
-                .ok_or_else(|| FeatureError::InputMissing(dataset_id.clone()))?;
-            let verified = entry.integrity.manifest_valid
-                && entry.integrity.raw_source_valid
-                && entry.integrity.canonical_parquet_valid;
-            if !verified {
-                return Err(FeatureError::InputIntegrity {
-                    dataset_id: dataset_id.clone(),
-                    reason: entry
-                        .diagnostic
-                        .unwrap_or_else(|| "snapshot digest verification failed".into()),
-                });
+        {
+            let mut check = self.source_check()?;
+            for dataset_id in &validated.dataset_ids {
+                let manifest = self
+                    .verified_source(&mut check, dataset_id, cancel)?
+                    .map_err(|problem| problem.into_error(dataset_id))?;
+                let bars_path = self.datasets.canonical_bars_path(dataset_id)?;
+                inputs.insert(
+                    dataset_id.clone(),
+                    ResolvedInput {
+                        manifest,
+                        bars_path,
+                    },
+                );
             }
-            if entry.status != DatasetStatus::Ready {
-                return Err(FeatureError::InputNotReady {
-                    dataset_id: dataset_id.clone(),
-                    status: entry.status.as_str().into(),
-                });
-            }
-            let manifest = entry.manifest.ok_or_else(|| FeatureError::InputIntegrity {
-                dataset_id: dataset_id.clone(),
-                reason: "verified manifest is unavailable".into(),
-            })?;
-            if manifest.bar_count > validated.quotas.max_input_rows {
-                return Err(FeatureError::ResourceQuota(format!(
-                    "dataset {dataset_id} has {} bars; the input-row quota is {}",
-                    manifest.bar_count, validated.quotas.max_input_rows
-                )));
-            }
-            let bars_path = self.datasets.canonical_bars_path(dataset_id)?;
-            inputs.insert(
-                dataset_id.clone(),
-                ResolvedInput {
-                    manifest,
-                    bars_path,
-                },
-            );
         }
+        // `dataset_ids` is a set, so each physical dataset counts once however many features
+        // reference it.
+        let counts: Vec<u64> = inputs
+            .values()
+            .map(|input| input.manifest.bar_count)
+            .collect();
+        check_input_rows(&counts, validated.quotas.max_input_rows)?;
         let series_rows = |selector: &crate::spec::SeriesSelector| {
             inputs[&selector.dataset_id]
                 .manifest
@@ -320,19 +353,12 @@ impl FeatureStore {
     ) -> Result<FeatureCommitResult, FeatureError> {
         let stage = verify_prepared(prepared, &self.staging_directory)?;
         let manifest = &prepared.manifest;
+        let never = AtomicBool::new(false);
+        let mut check = self.source_check()?;
         for input in &manifest.identity.inputs {
-            let entry = self
-                .datasets
-                .inspect_dataset(&input.dataset_id)?
-                .ok_or_else(|| FeatureError::InputMissing(input.dataset_id.clone()))?;
-            let unchanged = entry.status == DatasetStatus::Ready
-                && entry.integrity.manifest_valid
-                && entry.integrity.raw_source_valid
-                && entry.integrity.canonical_parquet_valid
-                && entry.manifest.as_ref().is_some_and(|dataset| {
-                    dataset.fingerprint == input.fingerprint
-                        && dataset.canonical_bars_sha256 == input.canonical_bars_sha256
-                });
+            let unchanged = self
+                .verified_source(&mut check, &input.dataset_id, &never)?
+                .is_ok_and(|dataset| source_matches(&dataset, input));
             if !unchanged {
                 return Err(FeatureError::InputIntegrity {
                     dataset_id: input.dataset_id.clone(),
@@ -345,7 +371,7 @@ impl FeatureStore {
             get_feature_set_metadata(&connection, &manifest.feature_set_id)?
         };
         if let Some(existing) = existing {
-            let entry = self.verify_metadata(&existing, &AtomicBool::new(false))?;
+            let entry = self.verify_metadata(&existing, &mut check, &never)?;
             if entry.status == FeatureSetStatus::Quarantined {
                 return Err(FeatureError::ExistingFeatureSetCorrupt(
                     manifest.feature_set_id.clone(),
@@ -369,6 +395,7 @@ impl FeatureStore {
                 disposition: FeatureCommitDisposition::Reused,
             });
         }
+        drop(check);
         let destination = self.feature_sets_directory.join(&manifest.feature_set_id);
         if path_exists(&destination)? {
             return Err(FeatureError::OrphanDirectoryExists);
@@ -459,10 +486,13 @@ impl FeatureStore {
         Ok(list_feature_attempts(&connection, ATTEMPT_HISTORY_LIMIT)?)
     }
 
+    /// Lists every registered feature set after re-verifying its manifest, output digest, and the
+    /// current bytes of each source snapshot. Each source dataset is hashed once per call.
     pub fn list_feature_sets(
         &self,
         cancel: &AtomicBool,
     ) -> Result<Vec<FeatureSetCatalogEntry>, FeatureError> {
+        let mut check = self.source_check()?;
         let mut entries = Vec::new();
         let mut cursor = String::new();
         loop {
@@ -478,11 +508,12 @@ impl FeatureStore {
             }
             for metadata in page {
                 cursor.clone_from(&metadata.feature_set_id);
-                entries.push(self.verify_metadata(&metadata, cancel)?);
+                entries.push(self.verify_metadata(&metadata, &mut check, cancel)?);
             }
         }
     }
 
+    /// Re-verifies one registered feature set, including the current bytes of its sources.
     pub fn inspect_feature_set(
         &self,
         feature_set_id: &str,
@@ -492,23 +523,37 @@ impl FeatureStore {
             let connection = self.connection_guard()?;
             get_feature_set_metadata(&connection, feature_set_id)?
         };
-        metadata
-            .map(|item| self.verify_metadata(&item, &AtomicBool::new(false)))
-            .transpose()
+        let Some(metadata) = metadata else {
+            return Ok(None);
+        };
+        let mut check = self.source_check()?;
+        self.verify_metadata(&metadata, &mut check, &AtomicBool::new(false))
+            .map(Some)
     }
 
-    /// Path of a registered feature set's output file, for verified downstream reads.
+    /// Downstream-use boundary: returns a feature set's output path only when it is registered
+    /// and READY after re-verification of its manifest, output digest, and source snapshots.
+    /// BLOCKED, QUARANTINED, and unknown sets fail closed. Callers must still compare the file
+    /// digest with the manifest around every read.
     pub fn output_path(&self, feature_set_id: &str) -> Result<PathBuf, FeatureError> {
-        validate_feature_set_id(feature_set_id)?;
-        Ok(self
-            .feature_sets_directory
-            .join(feature_set_id)
-            .join(OUTPUT_FILE))
+        let not_usable = |status: &str| FeatureError::FeatureSetNotUsable {
+            feature_set_id: feature_set_id.into(),
+            status: status.into(),
+        };
+        match self.inspect_feature_set(feature_set_id)? {
+            Some(entry) if entry.status == FeatureSetStatus::Ready => Ok(self
+                .feature_sets_directory
+                .join(feature_set_id)
+                .join(OUTPUT_FILE)),
+            Some(entry) => Err(not_usable(entry.status.as_str())),
+            None => Err(not_usable("NOT_REGISTERED")),
+        }
     }
 
     fn verify_metadata(
         &self,
         metadata: &FeatureSetMetadata,
+        check: &mut SourceCheck<'_>,
         cancel: &AtomicBool,
     ) -> Result<FeatureSetCatalogEntry, FeatureError> {
         let manifest = serde_json::from_str::<FeatureSetManifest>(&metadata.manifest_json).ok();
@@ -532,18 +577,28 @@ impl FeatureStore {
             && directory_is_regular(&directory)
             && is_regular_file(&directory.join(OUTPUT_FILE))?
             && engine::sha256_file(&directory.join(OUTPUT_FILE), cancel)? == metadata.output_sha256;
-        let lineage_valid = match &manifest {
-            Some(manifest) => self.lineage_matches(&metadata.feature_set_id, manifest)?,
-            None => false,
+        let lineage_problem = match &manifest {
+            Some(manifest) => {
+                self.lineage_problem(&metadata.feature_set_id, manifest, check, cancel)?
+            }
+            None => Some("feature-set manifest is unreadable, so lineage cannot be checked".into()),
         };
         let integrity = FeatureSetIntegrity {
             manifest_valid: metadata.manifest_integrity_valid
                 && identity_valid
                 && manifest_file_valid,
             output_valid,
-            lineage_valid,
+            lineage_valid: lineage_problem.is_none(),
         };
         let valid = integrity.is_valid();
+        let diagnostic = if !integrity.manifest_valid || !integrity.output_valid {
+            Some(
+                "manifest, output digest, or dataset lineage does not match the immutable registry"
+                    .to_owned(),
+            )
+        } else {
+            lineage_problem
+        };
         Ok(FeatureSetCatalogEntry {
             feature_set_id: metadata.feature_set_id.clone(),
             identity_sha256: metadata.identity_sha256.clone(),
@@ -553,21 +608,25 @@ impl FeatureStore {
                 _ => FeatureSetStatus::Quarantined,
             },
             manifest,
-            diagnostic: (!valid).then(|| {
-                "manifest, output digest, or dataset lineage does not match the immutable registry"
-                    .into()
-            }),
+            diagnostic,
             integrity,
         })
     }
 
-    fn lineage_matches(
+    /// Checks the registered lineage rows against the manifest, then re-verifies the current
+    /// bytes and canonical hashes of every source snapshot. Returns why lineage is untrustworthy,
+    /// or `None` when every source is READY and unchanged.
+    fn lineage_problem(
         &self,
         feature_set_id: &str,
         manifest: &FeatureSetManifest,
-    ) -> Result<bool, FeatureError> {
-        let connection = self.connection_guard()?;
-        let recorded = list_feature_set_inputs(&connection, feature_set_id)?;
+        check: &mut SourceCheck<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<Option<String>, FeatureError> {
+        let recorded = {
+            let connection = self.connection_guard()?;
+            list_feature_set_inputs(&connection, feature_set_id)?
+        };
         let expected: Vec<_> = manifest
             .identity
             .inputs
@@ -578,20 +637,85 @@ impl FeatureStore {
             })
             .collect();
         if recorded != expected {
-            return Ok(false);
+            return Ok(Some(
+                "registered dataset lineage does not match the feature-set manifest".into(),
+            ));
         }
-        for input in &recorded {
-            let present =
-                get_dataset_metadata(&connection, &input.dataset_id)?.is_some_and(|dataset| {
-                    dataset.manifest_integrity_valid
-                        && dataset.fingerprint == input.dataset_fingerprint
-                        && dataset.status == "READY"
-                });
-            if !present {
-                return Ok(false);
+        for input in &manifest.identity.inputs {
+            match self.verified_source(check, &input.dataset_id, cancel)? {
+                Err(problem) => {
+                    return Ok(Some(format!(
+                        "source dataset {} {}",
+                        input.dataset_id,
+                        problem.describe()
+                    )))
+                }
+                Ok(dataset) if !source_matches(&dataset, input) => {
+                    return Ok(Some(format!(
+                        "source dataset {} no longer matches the recorded fingerprint, canonical \
+                         bars digest, or bar count",
+                        input.dataset_id
+                    )))
+                }
+                Ok(_) => {}
             }
         }
-        Ok(true)
+        Ok(None)
+    }
+
+    fn source_check(&self) -> Result<SourceCheck<'_>, FeatureError> {
+        Ok(SourceCheck {
+            _verification: self.source_verification_guard()?,
+            verified: BTreeMap::new(),
+        })
+    }
+
+    /// Re-verifies a Data Ground snapshot's raw source, canonical bars, and manifest bytes
+    /// against their registered digests, once per [`SourceCheck`]. The SQLite connection lock is
+    /// not held while hashing.
+    fn verified_source(
+        &self,
+        check: &mut SourceCheck<'_>,
+        dataset_id: &str,
+        cancel: &AtomicBool,
+    ) -> Result<Result<DatasetManifest, SourceProblem>, FeatureError> {
+        if let Some(result) = check.verified.get(dataset_id) {
+            return Ok(result.clone());
+        }
+        let entry = match self
+            .datasets
+            .inspect_dataset_with_cancel(dataset_id, cancel)
+        {
+            Ok(entry) => entry,
+            Err(DatasetStoreError::Data(DataGroundError::Cancelled)) => {
+                return Err(FeatureError::Cancelled)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let result = match entry {
+            None => Err(SourceProblem::Missing),
+            Some(entry) => {
+                let verified = entry.integrity.manifest_valid
+                    && entry.integrity.raw_source_valid
+                    && entry.integrity.canonical_parquet_valid;
+                match entry.manifest {
+                    _ if !verified => {
+                        Err(SourceProblem::Integrity(entry.diagnostic.unwrap_or_else(
+                            || "snapshot digest verification failed".into(),
+                        )))
+                    }
+                    _ if entry.status != DatasetStatus::Ready => {
+                        Err(SourceProblem::NotReady(entry.status.as_str().into()))
+                    }
+                    Some(manifest) => Ok(manifest),
+                    None => Err(SourceProblem::Integrity(
+                        "verified manifest is unavailable".into(),
+                    )),
+                }
+            }
+        };
+        check.verified.insert(dataset_id.into(), result.clone());
+        Ok(result)
     }
 
     fn recover_pending_promotions(&self) -> Result<(), FeatureError> {
@@ -689,6 +813,12 @@ impl FeatureStore {
 
     fn operation_guard(&self) -> Result<MutexGuard<'_, ()>, FeatureError> {
         self.operation_lock
+            .lock()
+            .map_err(|_| FeatureError::Poisoned)
+    }
+
+    fn source_verification_guard(&self) -> Result<MutexGuard<'_, ()>, FeatureError> {
+        self.source_verification
             .lock()
             .map_err(|_| FeatureError::Poisoned)
     }
@@ -819,6 +949,38 @@ fn prepare_in_stage(
         manifest_sha256,
         staging_directory: stage.to_path_buf(),
     })
+}
+
+/// Whether a verified source snapshot is the exact content a feature set was computed from.
+fn source_matches(dataset: &DatasetManifest, input: &InputDatasetIdentity) -> bool {
+    dataset.dataset_id == input.dataset_id
+        && dataset.fingerprint == input.fingerprint
+        && dataset.canonical_bars_sha256 == input.canonical_bars_sha256
+        && dataset.canonical_bars_fingerprint == input.canonical_bars_fingerprint
+        && dataset.bar_count == input.bar_count
+}
+
+/// Enforces `max_input_rows` as the aggregate bar count of the unique physical datasets one
+/// request reads. Overflow fails closed as a quota error.
+fn check_input_rows(counts: &[u64], max_input_rows: u64) -> Result<u64, FeatureError> {
+    let total = counts
+        .iter()
+        .try_fold(0u64, |total, count| total.checked_add(*count))
+        .ok_or_else(|| {
+            FeatureError::ResourceQuota(format!(
+                "aggregate bars of {} input datasets overflow a 64-bit count; the input-row \
+                 quota is {max_input_rows}",
+                counts.len()
+            ))
+        })?;
+    if total > max_input_rows {
+        return Err(FeatureError::ResourceQuota(format!(
+            "{} input datasets hold {total} bars in aggregate; the input-row quota is \
+             {max_input_rows}",
+            counts.len()
+        )));
+    }
+    Ok(total)
 }
 
 fn metadata_from_prepared(prepared: &PreparedFeatureSet) -> FeatureSetMetadata {
@@ -990,4 +1152,27 @@ fn validate_feature_set_id(value: &str) -> Result<(), FeatureError> {
 
 fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_resource_controls_aggregate_input_rows_use_checked_arithmetic() {
+        assert_eq!(check_input_rows(&[108], 108).unwrap(), 108);
+        assert_eq!(check_input_rows(&[108, 48], 156).unwrap(), 156);
+        assert_eq!(check_input_rows(&[108, 48], 157).unwrap(), 156);
+        assert!(matches!(
+            check_input_rows(&[108, 48], 155),
+            Err(FeatureError::ResourceQuota(message)) if message.contains("156")
+        ));
+        assert_eq!(check_input_rows(&[u64::MAX], u64::MAX).unwrap(), u64::MAX);
+        for overflow in [&[u64::MAX, 1][..], &[u64::MAX / 2 + 1, u64::MAX / 2 + 1]] {
+            assert!(matches!(
+                check_input_rows(overflow, u64::MAX),
+                Err(FeatureError::ResourceQuota(message)) if message.contains("overflow")
+            ));
+        }
+    }
 }

@@ -12,7 +12,12 @@ The known `cancelPreview` path can report a misleading generic error when cancel
 
 ## RG-R02 status
 
-RG-R02 Feature Studio is implemented on `work/rg-r02-feature-studio` and is `READY_FOR_CONTROL_ROOM_AUDIT`. It is not Owner accepted. The machine-readable state records `builder_status: IMPLEMENTED` and `automated_status: AUTOMATED_PASS` for the candidate, with `owner_ui_status: PENDING`, `owner_acceptance: PENDING`, and `next_phase_unlocked: false`. The acceptance gate IDs in `PHASE_MANIFEST.yaml` are unchanged from the activation commit.
+RG-R02 Feature Studio is implemented on `work/rg-r02-feature-studio`. The Control Room audit of PR #6 head `7a828b63a69f30d8c3bbf03b45505b2dfb2a1ead` returned `REPAIR_REQUIRED` for two defects, both repaired on the same branch and submitted for re-audit (`READY_FOR_CONTROL_ROOM_REAUDIT`). It is not Owner accepted.
+
+- P1: a registered feature set stayed `READY` after its source `bars.parquet` was tampered with, because catalogue reads checked only SQLite status and stored fingerprints. Catalogue reads and the downstream output accessor now re-verify every source snapshot's current bytes and canonical hashes through Data Ground, with no SQLite lock held while hashing; a missing, modified, unverifiable, or non-`READY` source quarantines the set.
+- P2: `max_input_rows` was checked per dataset. It is now the aggregate of the unique physical input datasets, checked once with overflow-checked arithmetic before materialization; `max_target_rows` is unchanged.
+
+Each regression was run against the unrepaired head and failed, then passed after the repair. The machine-readable state records `builder_status: IMPLEMENTED` and `automated_status: AUTOMATED_PASS` for the candidate, with `owner_ui_status: PENDING`, `owner_acceptance: PENDING`, and `next_phase_unlocked: false`. The acceptance gate IDs in `PHASE_MANIFEST.yaml` are unchanged from the activation commit.
 
 Each automated gate is evidenced by tests named after its gate ID (Rust `gate_<id>_*`; frontend `gate feature_studio_ui ...`). `scripts/Invoke-PhaseGateTests.ps1` runs each gate's tests separately, fails a gate that has no matching tests, writes per-gate logs, and writes `phase-gates.json` with test counts. `New-CiEvidence.ps1` embeds those counts and their checksum in `acceptance.json`. A generic suite pass is never inherited as gate evidence: `Test-CiEvidence.ps1` proves that without per-gate results every feature gate reports `NOT_RUN`.
 

@@ -695,6 +695,49 @@ mod tests {
     }
 
     #[test]
+    fn gate_feature_studio_ui_ipc_catalogue_revokes_readiness_after_source_tamper() {
+        let harness = harness();
+        ipc(
+            &harness.webview,
+            "preview_feature_set",
+            serde_json::json!({"jobId": JOB_ID, "request": request_json(&harness.dataset_id)}),
+        )
+        .unwrap();
+        let committed = ipc(
+            &harness.webview,
+            "confirm_feature_set",
+            serde_json::json!({"jobId": JOB_ID}),
+        )
+        .unwrap();
+        let catalog = ipc(&harness.webview, "list_feature_sets", serde_json::json!({})).unwrap();
+        assert_eq!(catalog[0]["status"], "READY");
+
+        let bars = harness
+            ._directory
+            .path()
+            .join("app-data")
+            .join("datasets")
+            .join(&harness.dataset_id)
+            .join("bars.parquet");
+        let mut bytes = fs::read(&bars).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0x5a;
+        fs::write(&bars, bytes).unwrap();
+
+        let catalog = ipc(&harness.webview, "list_feature_sets", serde_json::json!({})).unwrap();
+        assert_eq!(catalog[0]["status"], "QUARANTINED");
+        assert_eq!(catalog[0]["integrity"]["lineage_valid"], false);
+        let inspected = ipc(
+            &harness.webview,
+            "inspect_feature_set",
+            serde_json::json!({"featureSetId": committed["feature_set_id"]}),
+        )
+        .unwrap();
+        assert_eq!(inspected["status"], "QUARANTINED");
+        assert_eq!(inspected["integrity"]["lineage_valid"], false);
+    }
+
+    #[test]
     fn gate_data_policy_feature_ipc_accepts_registry_identities_never_filesystem_paths() {
         let harness = harness();
         let mut with_path = request_json(&harness.dataset_id);
