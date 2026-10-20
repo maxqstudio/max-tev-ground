@@ -101,6 +101,11 @@ impl FeatureStudioState {
         })
     }
 
+    /// The shared feature registry, so Strategy Studio consumes the same verified feature sets.
+    pub fn store(&self) -> Arc<FeatureStore> {
+        Arc::clone(&self.store)
+    }
+
     fn guard<'a, T>(mutex: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, String> {
         mutex.lock().map_err(|_| UNAVAILABLE.to_owned())
     }

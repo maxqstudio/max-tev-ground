@@ -2241,6 +2241,7 @@ dependencies = [
  "rg-feature-studio",
  "rg-governance",
  "rg-persistence",
+ "rg-strategy-engine",
  "serde",
  "serde_json",
  "tauri",
@@ -3221,8 +3222,28 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rg-strategy-engine"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "chrono",
+ "parquet",
+ "rg-data-ground",
+ "rg-feature-studio",
+ "rg-persistence",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]

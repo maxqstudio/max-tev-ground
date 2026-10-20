@@ -10,26 +10,26 @@ const fixtureSnapshot: FoundationSnapshot = {
   project: "MAX Research Ground",
   current_phase: "RG-R03",
   phase_lifecycle: "ACTIVE",
-  builder_status: "NOT_STARTED",
-  automated_status: "NOT_RUN",
+  builder_status: "IMPLEMENTED",
+  automated_status: "AUTOMATED_PASS",
   owner_ui_status: "PENDING",
   owner_acceptance: "PENDING",
   next_phase_unlocked: false,
   deliverables: {
-    verified_feature_input: "PLANNED",
-    strategy_registry: "PLANNED",
-    decision_engine: "PLANNED",
-    causal_context_joins: "PLANNED",
-    immutable_decision_sets: "PLANNED",
-    resource_controls: "PLANNED",
-    strategy_studio_ui: "PLANNED",
-    acceptance_evidence: "PLANNED",
+    verified_feature_input: "TESTED",
+    strategy_registry: "TESTED",
+    decision_engine: "TESTED",
+    causal_context_joins: "TESTED",
+    immutable_decision_sets: "TESTED",
+    resource_controls: "TESTED",
+    strategy_studio_ui: "TESTED",
+    acceptance_evidence: "TESTED",
   },
   pages: [
     { id: "overview", status: "IMPLEMENTED" },
     { id: "data-ground", status: "OWNER_ACCEPTED" },
     { id: "feature-studio", status: "OWNER_ACCEPTED" },
-    { id: "strategy-studio", status: "ACTIVE_NOT_STARTED" },
+    { id: "strategy-studio", status: "IN_PROGRESS" },
     { id: "model-lab", status: "PLANNED" },
     { id: "policy-studio", status: "PLANNED" },
     { id: "experiments", status: "PLANNED" },
@@ -138,8 +138,8 @@ describe("desktop shell navigation", () => {
   it("loads the governance snapshot through the Tauri IPC boundary", async () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "MAX Research Ground" })).toBeTruthy();
-    expect(screen.getByText("NOT STARTED")).toBeTruthy();
-    expect(screen.getByText("NOT RUN")).toBeTruthy();
+    expect(screen.getByText("Builder status").nextElementSibling?.textContent).toBe("IMPLEMENTED");
+    expect(screen.getByText("AUTOMATED PASS")).toBeTruthy();
     expect(screen.getByText("Owner UI review").nextElementSibling?.textContent).toBe("PENDING");
     expect(screen.getAllByText("LOCKED")).toHaveLength(2);
     expect(screen.getByText("Strategy registry")).toBeTruthy();
@@ -147,7 +147,7 @@ describe("desktop shell navigation", () => {
     expect(screen.getByText(/visual redesign is deferred, not accepted or waived/)).toBeTruthy();
   });
 
-  it("keeps accepted Feature Studio usable and shows Strategy Studio as authorized but not started", async () => {
+  it("keeps accepted Feature Studio usable and routes the active Strategy Studio to its workflow", async () => {
     mockIPC((command) => {
       if (command === "get_foundation_status") return fixtureSnapshot;
       if (command === "get_feature_registry") {
@@ -161,6 +161,18 @@ describe("desktop shell navigation", () => {
         };
       }
       if (command === "list_feature_inputs" || command === "list_feature_sets" || command === "list_feature_attempts") return [];
+      if (command === "get_strategy_registry") {
+        return {
+          engineId: "rg-native-strategies",
+          engineVersion: "1.0.0",
+          decisionSemantics: { version: 1, decision_rows: "", causality: "", context: "", skip_precedence: "", equality: "", conflict: "" },
+          strategies: [],
+          previewRows: 20,
+          researchNotice: "Research decisions; they are not orders.",
+        };
+      }
+      if (command === "list_decision_inputs" || command === "list_decision_sets" || command === "list_decision_attempts") return [];
+      if (command === "get_active_decision_job") return null;
       if (command === "get_active_feature_job") return null;
       return undefined;
     });
@@ -169,8 +181,8 @@ describe("desktop shell navigation", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Feature Studio" })).toBeTruthy();
     expect(await screen.findByText(/No READY verified dataset is registered/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Strategy Studio/ }));
-    expect(await screen.findByRole("heading", { name: "Strategy Studio implementation has not started" })).toBeTruthy();
-    expect(screen.getByText("ACTIVE NOT STARTED")).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 1, name: "Strategy Studio" })).toBeTruthy();
+    expect(await screen.findByText(/No READY feature set is registered/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Model Lab/ }));
     expect(await screen.findByRole("heading", { name: "Model Lab is not implemented yet" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Overview/ }));

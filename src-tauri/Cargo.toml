@@ -17,6 +17,7 @@ rg-data-ground = { path = "../crates/rg-data-ground" }
 rg-feature-studio = { path = "../crates/rg-feature-studio" }
 rg-governance = { path = "../crates/rg-governance" }
 rg-persistence = { path = "../crates/rg-persistence" }
+rg-strategy-engine = { path = "../crates/rg-strategy-engine" }
 serde.workspace = true
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true

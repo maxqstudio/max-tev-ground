@@ -536,15 +536,29 @@ impl FeatureStore {
     /// BLOCKED, QUARANTINED, and unknown sets fail closed. Callers must still compare the file
     /// digest with the manifest around every read.
     pub fn output_path(&self, feature_set_id: &str) -> Result<PathBuf, FeatureError> {
+        self.consumable_feature_set(feature_set_id)
+            .map(|(_, path)| path)
+    }
+
+    /// Downstream-use boundary that also returns the re-verified catalogue entry, so a consumer
+    /// reads the manifest and the output path from one verification. Same fail-closed rules as
+    /// [`FeatureStore::output_path`].
+    pub fn consumable_feature_set(
+        &self,
+        feature_set_id: &str,
+    ) -> Result<(FeatureSetCatalogEntry, PathBuf), FeatureError> {
         let not_usable = |status: &str| FeatureError::FeatureSetNotUsable {
             feature_set_id: feature_set_id.into(),
             status: status.into(),
         };
         match self.inspect_feature_set(feature_set_id)? {
-            Some(entry) if entry.status == FeatureSetStatus::Ready => Ok(self
-                .feature_sets_directory
-                .join(feature_set_id)
-                .join(OUTPUT_FILE)),
+            Some(entry) if entry.status == FeatureSetStatus::Ready && entry.manifest.is_some() => {
+                let path = self
+                    .feature_sets_directory
+                    .join(feature_set_id)
+                    .join(OUTPUT_FILE);
+                Ok((entry, path))
+            }
             Some(entry) => Err(not_usable(entry.status.as_str())),
             None => Err(not_usable("NOT_REGISTERED")),
         }

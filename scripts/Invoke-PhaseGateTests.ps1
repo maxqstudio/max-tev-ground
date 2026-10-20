@@ -23,7 +23,7 @@ $gateIds = @([regex]::Matches($gateSection.Groups[1].Value, '(?m)^\s+- id:\s*([a
 
 # Gates evidenced by other mechanisms: the source/governance envelope and the Owner's own review.
 $externallyEvidenced = @("reproducible_acceptance", "owner_ui_acceptance")
-$frontendGates = @("feature_studio_ui")
+$frontendGates = @("feature_studio_ui", "desktop_strategy_ipc")
 
 function Invoke-Native([scriptblock]$Command, [string]$LogPath) {
     $previous = $ErrorActionPreference
