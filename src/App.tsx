@@ -46,6 +46,12 @@ const deliverableLabels: Record<string, string> = {
   immutable_feature_sets: "Immutable feature sets",
   resource_controls: "Resource controls",
   feature_studio_ui: "Feature Studio UI",
+  verified_feature_input: "Verified feature input",
+  strategy_registry: "Strategy registry",
+  decision_engine: "Decision engine",
+  causal_context_joins: "Causal context joins",
+  immutable_decision_sets: "Immutable decision sets",
+  strategy_studio_ui: "Strategy Studio UI",
 };
 
 function statusLabel(value: string): string {

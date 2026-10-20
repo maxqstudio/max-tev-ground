@@ -1,6 +1,6 @@
-# RG-R01 closure and acceptance evidence
+# Phase closure and acceptance evidence
 
-## Accepted checkpoint
+## RG-R01 accepted checkpoint
 
 RG-R01 Data Ground is Owner accepted on merged `main` at source SHA `7f50b398ca272c4c84b5e5c01866945e9eda2a2a`, Git tree `46c8969bc31faa7f3efaa6474d5ced2322270623`. Post-merge GitHub Actions [run #39285471335](https://github.com/maxqstudio/max-tev-ground/actions/runs/39285471335) completed successfully on that exact SHA. Windows foundation checks and acceptance evidence attestation both succeeded. The uploaded artifact `rg-r01-evidence-39285471335-1` has GitHub digest `sha256:b7d6e6be850d150d8918d5a3331eb2c126c99749e13efbce61d8a891a0015d58`.
 
@@ -10,9 +10,9 @@ Owner acceptance is recorded in [Issue #2 comment #6269930193](https://github.co
 
 The known `cancelPreview` path can report a misleading generic error when cancellation succeeds but registry refresh fails. This remains unresolved and is carried forward as known UX debt; the closure does not claim it was fixed or manually reproduced.
 
-## RG-R02 status
+## RG-R02 implementation and repair history
 
-RG-R02 Feature Studio is implemented on `work/rg-r02-feature-studio`. The Control Room audit of PR #6 head `7a828b63a69f30d8c3bbf03b45505b2dfb2a1ead` returned `REPAIR_REQUIRED` for two defects. Both were repaired on the same branch in `0e76f26a5cc06788f8aa72a0ce996ae07be28590`, and the Control Room source re-audit verified the repairs. It is not Owner accepted.
+RG-R02 Feature Studio was implemented on `work/rg-r02-feature-studio`. The Control Room audit of PR #6 head `7a828b63a69f30d8c3bbf03b45505b2dfb2a1ead` returned `REPAIR_REQUIRED` for two defects. Both were repaired on the same branch in `0e76f26a5cc06788f8aa72a0ce996ae07be28590`, and the Control Room source re-audit verified the repairs. Owner acceptance is recorded under [RG-R02 accepted checkpoint](#rg-r02-accepted-checkpoint).
 
 - P1: a registered feature set stayed `READY` after its source `bars.parquet` was tampered with, because catalogue reads checked only SQLite status and stored fingerprints. Catalogue reads and the downstream output accessor now re-verify every source snapshot's current bytes and canonical hashes through Data Ground, with no SQLite lock held while hashing; a missing, modified, unverifiable, or non-`READY` source quarantines the set.
 - P2: `max_input_rows` was checked per dataset. It is now the aggregate of the unique physical input datasets, checked once with overflow-checked arithmetic before materialization; `max_target_rows` is unchanged.
@@ -36,8 +36,23 @@ The Control Room re-audit verified the P1/P2 repairs and the exact-SHA CI. The O
 
 **Deferred UX debt (not accepted, not waived):** the Owner finds the current UI confusing and visually unsatisfactory. The visual redesign is deferred. Nothing in this section records `OWNER_UI_PASS` or Owner acceptance.
 
+## RG-R02 accepted checkpoint
+
+The Owner accepted RG-R02 Feature Studio on 2026-10-20 ("iya pass lanjut aja"), as recorded in [Issue #4](https://github.com/maxqstudio/max-tev-ground/issues/4). This is recorded as `OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED`. Manual desktop click-through was **NOT_RUN**, and the Owner waived UI review: **waived, not tested**. It is not a manual interactive GUI pass.
+
+- Accepted candidate: `235bfe045abb9f3740611c3bf87114eb55973722`, tree `326b01e72b915746be2134d00a2d0d1fa737d853`. Push CI [#39402302070](https://github.com/maxqstudio/max-tev-ground/actions/runs/39402302070) and PR CI [#39402310436](https://github.com/maxqstudio/max-tev-ground/actions/runs/39402310436) both succeeded, with 12 of 12 automated gates passing. Control Room reviews: [source](https://github.com/maxqstudio/max-tev-ground/pull/6#pullrequestreview-5583046308) and [desktop](https://github.com/maxqstudio/max-tev-ground/pull/6#pullrequestreview-5583614520).
+- Merge: PR #6 was merged on Owner authorization into `main` at `59e0f2e7bd5a875b661bb608d289b3b21b595bd2`. Its tree, `326b01e72b915746be2134d00a2d0d1fa737d853`, is identical to the accepted candidate's.
+- Exact-main CI: [run #39405958946](https://github.com/maxqstudio/max-tev-ground/actions/runs/39405958946) completed successfully on that SHA. Windows foundation checks and acceptance evidence attestation both succeeded. The uploaded artifact `research-ground-evidence-39405958946-1` has GitHub digest `sha256:f42c1ba9a1c97e9cb0c32213a365b851abdc6cd191131a1782177d01cff5006e`.
+- Known debts carried forward: the deferred visual redesign; the unverified interactive desktop use (click-through NOT_RUN); and the RG-R01 `cancelPreview` cancel-to-refresh debt. Historical market data and trading edge remain NOT VERIFIED; GitHub CI did not verify the Owner's legacy baseline (`NOT_VERIFIED_BY_GITHUB_CI`).
+
+## RG-R03 activation (governance only)
+
+RG-R03 Deterministic Strategy Engine is activated by this governance change; its scope is defined in [Issue #7](https://github.com/maxqstudio/max-tev-ground/issues/7). No strategy code exists: `builder_status` is `NOT_STARTED` and `automated_status` is `NOT_RUN`. Owner UI status and Owner acceptance are `PENDING`, and RG-R04 stays locked.
+
+The twelve RG-R03 acceptance gates are frozen in `PHASE_MANIFEST.yaml` before implementation, and `rg-governance` rejects any change to that set. They follow the provisional list in Issue #7: `strategy_input_authority`, `typed_strategy_registry`, `decision_semantics`, `causal_no_lookahead`, `mtf_context_only`, `skip_and_conflict_handling`, `immutable_decision_materialization`, `resource_cancel_recovery`, `desktop_strategy_ipc`, `adversarial_tamper`, `reproducible_acceptance`, and `owner_ui_acceptance`. Until gate-traceable tests exist, each gate is reported `NOT_RUN`; generic suite success is never inherited.
+
 ## Acceptance runner
 
-`RUN_ACCEPTANCE.ps1` is scoped to the `work/rg-r02-feature-studio` candidate branch and runs non-interactively from the authorized Windows root. It checks pinned Rust/Node toolchains, Windows prerequisites, roadmap synchronization, CI evidence contracts, Rust formatting/tests/lint/build, frontend lint/typecheck/tests/build, the phase gate-traceable tests, and the Tauri build when MSVC is available. It writes per-command logs and a checksummed report bound to the exact candidate SHA/tree. It never launches the desktop or reads, copies, or modifies the legacy research baseline.
+`RUN_ACCEPTANCE.ps1` is scoped to the RG-R03 candidate branch `work/rg-r03-strategy-engine` and to the governance-only activation branch `work/rg-r02-closure-rg-r03-activation`. It runs non-interactively from the authorized Windows root. It checks pinned Rust/Node toolchains, Windows prerequisites, roadmap synchronization, CI evidence contracts, Rust formatting/tests/lint/build, frontend lint/typecheck/tests/build, the phase gate-traceable tests, and the Tauri build when MSVC is available. It writes per-command logs and a checksummed report bound to the exact candidate SHA/tree. It never launches the desktop or reads, copies, or modifies the legacy research baseline.
 
-GitHub CI runs the same gate-traceable step and uploads source-bound evidence, including the per-gate logs. RG-R03–RG-R08 remain planned.
+GitHub CI runs the same gate-traceable step and uploads source-bound evidence, including the per-gate logs. While RG-R03 records `builder_status: NOT_STARTED`, that step runs no gate tests, every RG-R03 gate is `NOT_RUN`, and the report's automated status is `NOT_RUN`; the local runner therefore exits with its not-passed code 3 even when every check succeeds. RG-R04–RG-R08 remain planned.

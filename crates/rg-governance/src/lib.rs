@@ -46,6 +46,20 @@ const REQUIRED_RG_R02_GATES: [&str; 13] = [
     "reproducible_acceptance",
     "owner_ui_acceptance",
 ];
+const REQUIRED_RG_R03_GATES: [&str; 12] = [
+    "strategy_input_authority",
+    "typed_strategy_registry",
+    "decision_semantics",
+    "causal_no_lookahead",
+    "mtf_context_only",
+    "skip_and_conflict_handling",
+    "immutable_decision_materialization",
+    "resource_cancel_recovery",
+    "desktop_strategy_ipc",
+    "adversarial_tamper",
+    "reproducible_acceptance",
+    "owner_ui_acceptance",
+];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -402,6 +416,7 @@ fn validate_acceptance_gates(phase: &PhaseManifest) -> Result<(), String> {
         "RG-R00" => Some(REQUIRED_RG_R00_GATES.as_slice()),
         "RG-R01" => Some(REQUIRED_RG_R01_GATES.as_slice()),
         "RG-R02" => Some(REQUIRED_RG_R02_GATES.as_slice()),
+        "RG-R03" => Some(REQUIRED_RG_R03_GATES.as_slice()),
         _ => None,
     };
     if let Some(required) = required {
@@ -516,6 +531,17 @@ fn validate_acceptance_history(
                 return Err("RG-R01 acceptance must preserve the cancel-to-refresh UX debt".into());
             }
         }
+        if record.phase == "RG-R02" {
+            if record.source_tree_sha.is_none() {
+                return Err("RG-R02 acceptance evidence requires the exact source tree SHA".into());
+            }
+            if !record.known_debts.iter().any(|debt| {
+                let normalized = debt.to_ascii_lowercase();
+                normalized.contains("visual") && normalized.contains("deferred")
+            }) {
+                return Err("RG-R02 acceptance must preserve the deferred visual UX debt".into());
+            }
+        }
     }
     for phase in roadmap.phases.iter().take(active_index) {
         if phase.lifecycle == Lifecycle::Accepted && !seen.contains(phase.id.as_str()) {
@@ -604,12 +630,16 @@ mod tests {
     use super::*;
 
     fn rg_r01_test_manifest() -> PhaseManifest {
+        accepted_test_manifest("RG-R01", &REQUIRED_RG_R01_GATES)
+    }
+
+    fn accepted_test_manifest(phase: &str, gates: &[&str]) -> PhaseManifest {
         PhaseManifest {
             schema_version: 3,
-            phase: "RG-R01".into(),
+            phase: phase.into(),
             lifecycle: Lifecycle::Accepted,
-            deliverables: vec!["data_ground".into()],
-            acceptance_gates: REQUIRED_RG_R01_GATES
+            deliverables: vec!["accepted_phase".into()],
+            acceptance_gates: gates
                 .iter()
                 .map(|id| AcceptanceGate {
                     id: (*id).into(),
@@ -623,10 +653,10 @@ mod tests {
     #[test]
     fn embedded_roadmap_phase_manifest_and_implementation_state_are_synchronized() {
         let result = validate_embedded().unwrap();
-        assert_eq!(result.current_phase, "RG-R02");
+        assert_eq!(result.current_phase, "RG-R03");
         assert_eq!(result.phase_lifecycle, Lifecycle::Active);
-        assert_eq!(result.builder_status, BuilderStatus::Implemented);
-        assert_eq!(result.automated_status, AutomatedStatus::AutomatedPass);
+        assert_eq!(result.builder_status, BuilderStatus::NotStarted);
+        assert_eq!(result.automated_status, AutomatedStatus::NotRun);
         assert_eq!(result.owner_ui_status, OwnerUiStatus::Pending);
         assert_eq!(result.owner_acceptance, OwnerAcceptanceStatus::Pending);
         assert!(!result.next_phase_unlocked);
@@ -637,27 +667,39 @@ mod tests {
                 .iter()
                 .filter(|page| page.status == "PLANNED")
                 .count(),
-            5
+            4
         );
-        assert_eq!(
+        let page_status = |id: &str| {
             result
                 .pages
                 .iter()
-                .find(|page| page.id == "data-ground")
+                .find(|page| page.id == id)
                 .unwrap()
-                .status,
-            "OWNER_ACCEPTED"
+                .status
+                .clone()
+        };
+        assert_eq!(page_status("data-ground"), "OWNER_ACCEPTED");
+        assert_eq!(page_status("feature-studio"), "OWNER_ACCEPTED");
+        assert_eq!(page_status("strategy-studio"), "ACTIVE_NOT_STARTED");
+        assert_eq!(result.accepted_phases.len(), 3);
+        let accepted_r02 = result
+            .accepted_phases
+            .iter()
+            .find(|phase| phase.phase == "RG-R02")
+            .unwrap();
+        assert_eq!(
+            accepted_r02.owner_ui_status,
+            OwnerUiStatus::OwnerAcceptedWithUiReviewWaived
         );
         assert_eq!(
-            result
-                .pages
-                .iter()
-                .find(|page| page.id == "feature-studio")
-                .unwrap()
-                .status,
-            "IN_PROGRESS"
+            accepted_r02.source_sha,
+            "59e0f2e7bd5a875b661bb608d289b3b21b595bd2"
         );
-        assert_eq!(result.accepted_phases.len(), 2);
+        assert_eq!(
+            accepted_r02.source_tree_sha.as_deref(),
+            Some("326b01e72b915746be2134d00a2d0d1fa737d853")
+        );
+        assert_eq!(accepted_r02.known_debts.len(), 2);
         let accepted_r01 = result
             .accepted_phases
             .iter()
@@ -686,7 +728,7 @@ mod tests {
 
     #[test]
     fn phase_manifest_must_match_the_active_roadmap_phase() {
-        let changed = PHASE_SOURCE.replace("phase: RG-R02", "phase: RG-R03");
+        let changed = PHASE_SOURCE.replace("phase: RG-R03", "phase: RG-R04");
         assert!(parse_documents(ROADMAP_SOURCE, &changed, IMPLEMENTATION_SOURCE).is_err());
     }
 
@@ -704,7 +746,7 @@ mod tests {
     fn implementation_deliverables_must_match_phase_manifest() {
         let changed = IMPLEMENTATION_SOURCE
             .lines()
-            .filter(|line| !line.trim_start().starts_with("indicator_registry:"))
+            .filter(|line| !line.trim_start().starts_with("strategy_registry:"))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &changed).is_err());
@@ -714,19 +756,19 @@ mod tests {
     fn generated_document_has_a_single_active_phase_statement() {
         let mut roadmap: Roadmap = serde_yaml_ng::from_str(ROADMAP_SOURCE).unwrap();
         let generated = render_roadmap(&roadmap);
-        assert!(generated.contains("Current active phase: RG-R02"));
+        assert!(generated.contains("Current active phase: RG-R03"));
         assert!(generated.contains("RG-R08"));
         assert!(generated.ends_with('\n'));
         assert!(!generated.ends_with("\n\n"));
 
-        roadmap.current_phase = "RG-R03".into();
+        roadmap.current_phase = "RG-R04".into();
         for phase in &mut roadmap.phases {
             match phase.id.as_str() {
-                "RG-R00" | "RG-R01" | "RG-R02" => {
+                "RG-R00" | "RG-R01" | "RG-R02" | "RG-R03" => {
                     phase.lifecycle = Lifecycle::Accepted;
                     phase.acceptance_evidence = Some("fixture evidence".into());
                 }
-                "RG-R03" => {
+                "RG-R04" => {
                     phase.lifecycle = Lifecycle::Active;
                     phase.acceptance_evidence = None;
                 }
@@ -737,9 +779,9 @@ mod tests {
             }
         }
         let generated_later_phase = render_roadmap(&roadmap);
-        assert!(generated_later_phase.contains("Current active phase: RG-R03"));
+        assert!(generated_later_phase.contains("Current active phase: RG-R04"));
         assert!(
-            generated_later_phase.contains("## RG-R03 — Deterministic Strategy Engine (ACTIVE)")
+            generated_later_phase.contains("## RG-R04 — Ollama and ONNX Model Registry (ACTIVE)")
         );
         assert!(generated_later_phase
             .contains("## RG-R00 — Rust foundation, Tauri shell, governance, CI (ACCEPTED)"));
@@ -776,15 +818,28 @@ mod tests {
     }
 
     #[test]
-    fn rg_r02_gate_contract_is_exact_and_cannot_lose_a_mandatory_gate() {
-        let mut phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
-        assert_eq!(phase.phase, "RG-R02");
+    fn rg_r02_gate_contract_remains_fixed_after_transition() {
+        let mut phase = accepted_test_manifest("RG-R02", &REQUIRED_RG_R02_GATES);
+        assert!(validate_acceptance_gates(&phase).is_ok());
         phase
             .acceptance_gates
             .retain(|gate| gate.id != "indicator_registry");
         assert!(validate_acceptance_gates(&phase)
             .unwrap_err()
             .contains("indicator_registry"));
+    }
+
+    #[test]
+    fn rg_r03_gate_contract_is_exact_and_cannot_lose_a_mandatory_gate() {
+        let mut phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
+        assert_eq!(phase.phase, "RG-R03");
+        assert!(validate_acceptance_gates(&phase).is_ok());
+        phase
+            .acceptance_gates
+            .retain(|gate| gate.id != "decision_semantics");
+        assert!(validate_acceptance_gates(&phase)
+            .unwrap_err()
+            .contains("decision_semantics"));
     }
 
     #[test]
@@ -830,16 +885,49 @@ mod tests {
     }
 
     #[test]
+    fn rg_r02_acceptance_records_waived_ui_review_and_deferred_visual_debt() {
+        let result = validate_embedded().unwrap();
+        let accepted = result
+            .accepted_phases
+            .iter()
+            .find(|phase| phase.phase == "RG-R02")
+            .unwrap();
+        assert_eq!(
+            accepted.owner_ui_status,
+            OwnerUiStatus::OwnerAcceptedWithUiReviewWaived
+        );
+        assert!(accepted
+            .known_debts
+            .iter()
+            .any(|debt| debt.contains("NOT_RUN")));
+
+        let dropped = IMPLEMENTATION_SOURCE.replace("redesign is deferred", "is acceptable");
+        assert_ne!(dropped, IMPLEMENTATION_SOURCE);
+        let error = parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &dropped).unwrap_err();
+        assert!(error.contains("deferred visual UX debt"));
+
+        let without_tree = IMPLEMENTATION_SOURCE.replace(
+            "    source_tree_sha: 326b01e72b915746be2134d00a2d0d1fa737d853\n",
+            "",
+        );
+        assert_ne!(without_tree, IMPLEMENTATION_SOURCE);
+        let error = parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &without_tree).unwrap_err();
+        assert!(error.contains("RG-R02 acceptance evidence requires the exact source tree SHA"));
+    }
+
+    #[test]
     fn not_started_phase_cannot_claim_automated_pass() {
-        let changed = IMPLEMENTATION_SOURCE
-            .replace("builder_status: IMPLEMENTED", "builder_status: NOT_STARTED");
-        assert!(changed.contains("automated_status: AUTOMATED_PASS"));
+        let changed = IMPLEMENTATION_SOURCE.replace(
+            "automated_status: NOT_RUN",
+            "automated_status: AUTOMATED_PASS",
+        );
+        assert_ne!(changed, IMPLEMENTATION_SOURCE);
         let error = parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &changed).unwrap_err();
         assert!(error.contains("cannot claim automated acceptance"));
     }
 
     #[test]
-    fn rg_r02_builder_cannot_self_accept_ui_or_owner_review_or_unlock_rg_r03() {
+    fn rg_r03_builder_cannot_self_accept_ui_or_owner_review_or_unlock_rg_r04() {
         for (from, to, expected) in [
             (
                 "owner_ui_status: PENDING",
@@ -862,7 +950,7 @@ mod tests {
             let error = parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &changed).unwrap_err();
             assert!(error.contains(expected), "{to}: {error}");
         }
-        // The first PLANNED lifecycle in the roadmap is RG-R03's.
+        // The first PLANNED lifecycle in the roadmap is RG-R04's.
         let activated = ROADMAP_SOURCE.replacen("lifecycle: PLANNED", "lifecycle: ACTIVE", 1);
         assert_ne!(activated, ROADMAP_SOURCE);
         assert!(parse_documents(&activated, PHASE_SOURCE, IMPLEMENTATION_SOURCE).is_err());
@@ -874,7 +962,7 @@ mod tests {
         let duplicate = phase
             .acceptance_gates
             .iter()
-            .find(|gate| gate.id == "indicator_registry")
+            .find(|gate| gate.id == "typed_strategy_registry")
             .unwrap()
             .clone();
         phase.acceptance_gates.push(duplicate);

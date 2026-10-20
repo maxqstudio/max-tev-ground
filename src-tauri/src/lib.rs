@@ -90,34 +90,44 @@ mod tests {
         .deserialize::<serde_json::Value>()
         .expect("command response should be JSON");
 
-        assert_eq!(response["current_phase"], "RG-R02");
+        assert_eq!(response["current_phase"], "RG-R03");
         assert_eq!(response["phase_lifecycle"], "ACTIVE");
-        assert_eq!(response["builder_status"], "IMPLEMENTED");
-        assert_eq!(response["automated_status"], "AUTOMATED_PASS");
+        assert_eq!(response["builder_status"], "NOT_STARTED");
+        assert_eq!(response["automated_status"], "NOT_RUN");
         assert_eq!(response["owner_ui_status"], "PENDING");
         assert_eq!(response["owner_acceptance"], "PENDING");
         assert_eq!(response["pages"].as_array().unwrap().len(), 8);
         assert_eq!(
-            response["accepted_phases"][1]["owner_ui_status"],
-            "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED"
-        );
-        assert_eq!(
             response["accepted_phases"][1]["source_tree_sha"],
             "46c8969bc31faa7f3efaa6474d5ced2322270623"
         );
+        assert_eq!(response["accepted_phases"][2]["phase"], "RG-R02");
+        assert_eq!(
+            response["accepted_phases"][2]["owner_ui_status"],
+            "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED"
+        );
+        assert_eq!(
+            response["accepted_phases"][2]["source_tree_sha"],
+            "326b01e72b915746be2134d00a2d0d1fa737d853"
+        );
         assert_eq!(response["pages"][1]["status"], "OWNER_ACCEPTED");
-        assert_eq!(response["pages"][2]["status"], "IN_PROGRESS");
-        assert_eq!(response["pages"][3]["status"], "PLANNED");
+        assert_eq!(response["pages"][2]["status"], "OWNER_ACCEPTED");
+        assert_eq!(response["pages"][3]["status"], "ACTIVE_NOT_STARTED");
+        assert_eq!(response["pages"][4]["status"], "PLANNED");
         assert!(!response["next_phase_unlocked"].as_bool().unwrap());
     }
 
     #[test]
     fn direct_command_boundary_never_claims_owner_acceptance() {
         let response = commands::get_foundation_status().unwrap();
-        assert_eq!(response.current_phase, "RG-R02");
+        assert_eq!(response.current_phase, "RG-R03");
         assert_eq!(
             response.builder_status,
-            rg_governance::BuilderStatus::Implemented
+            rg_governance::BuilderStatus::NotStarted
+        );
+        assert_eq!(
+            response.automated_status,
+            rg_governance::AutomatedStatus::NotRun
         );
         assert_eq!(
             response.owner_ui_status,

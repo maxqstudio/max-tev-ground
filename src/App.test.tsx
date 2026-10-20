@@ -8,28 +8,28 @@ import type { ActiveImportState, DatasetCatalogEntry, DatasetCatalogProgress, Im
 
 const fixtureSnapshot: FoundationSnapshot = {
   project: "MAX Research Ground",
-  current_phase: "RG-R02",
+  current_phase: "RG-R03",
   phase_lifecycle: "ACTIVE",
-  builder_status: "IMPLEMENTED",
-  automated_status: "AUTOMATED_PASS",
+  builder_status: "NOT_STARTED",
+  automated_status: "NOT_RUN",
   owner_ui_status: "PENDING",
   owner_acceptance: "PENDING",
   next_phase_unlocked: false,
   deliverables: {
-    verified_input_authority: "TESTED",
-    indicator_registry: "TESTED",
-    causal_feature_engine: "TESTED",
-    multi_timeframe_joins: "TESTED",
-    immutable_feature_sets: "TESTED",
-    resource_controls: "TESTED",
-    feature_studio_ui: "TESTED",
-    acceptance_evidence: "TESTED",
+    verified_feature_input: "PLANNED",
+    strategy_registry: "PLANNED",
+    decision_engine: "PLANNED",
+    causal_context_joins: "PLANNED",
+    immutable_decision_sets: "PLANNED",
+    resource_controls: "PLANNED",
+    strategy_studio_ui: "PLANNED",
+    acceptance_evidence: "PLANNED",
   },
   pages: [
     { id: "overview", status: "IMPLEMENTED" },
     { id: "data-ground", status: "OWNER_ACCEPTED" },
-    { id: "feature-studio", status: "IN_PROGRESS" },
-    { id: "strategy-studio", status: "PLANNED" },
+    { id: "feature-studio", status: "OWNER_ACCEPTED" },
+    { id: "strategy-studio", status: "ACTIVE_NOT_STARTED" },
     { id: "model-lab", status: "PLANNED" },
     { id: "policy-studio", status: "PLANNED" },
     { id: "experiments", status: "PLANNED" },
@@ -53,6 +53,19 @@ const fixtureSnapshot: FoundationSnapshot = {
       ci_run_url: "https://github.com/maxqstudio/max-tev-ground/actions/runs/39285471335",
       owner_issue_url: "https://github.com/maxqstudio/max-tev-ground/issues/2#issuecomment-6269930193",
       known_debts: ["cancelPreview may report a generic error when cancellation succeeds but registry refresh fails; unresolved UX debt, not fixed or manually tested."],
+    },
+    {
+      phase: "RG-R02",
+      owner_acceptance: "OWNER_ACCEPTED",
+      owner_ui_status: "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED",
+      source_sha: "59e0f2e7bd5a875b661bb608d289b3b21b595bd2",
+      source_tree_sha: "326b01e72b915746be2134d00a2d0d1fa737d853",
+      ci_run_url: "https://github.com/maxqstudio/max-tev-ground/actions/runs/39405958946",
+      owner_issue_url: "https://github.com/maxqstudio/max-tev-ground/issues/4",
+      known_debts: [
+        "Manual desktop click-through was NOT_RUN; the Owner waived UI review (UI_REVIEW_WAIVED), so interactive use remains unverified.",
+        "The Owner finds the UI confusing and visually unsatisfactory; visual redesign is deferred, not accepted or waived.",
+      ],
     },
   ],
 };
@@ -125,14 +138,16 @@ describe("desktop shell navigation", () => {
   it("loads the governance snapshot through the Tauri IPC boundary", async () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "MAX Research Ground" })).toBeTruthy();
-    expect(screen.getByText("AUTOMATED PASS")).toBeTruthy();
+    expect(screen.getByText("NOT STARTED")).toBeTruthy();
+    expect(screen.getByText("NOT RUN")).toBeTruthy();
     expect(screen.getByText("Owner UI review").nextElementSibling?.textContent).toBe("PENDING");
     expect(screen.getAllByText("LOCKED")).toHaveLength(2);
-    expect(screen.getByText("Verified input authority")).toBeTruthy();
-    expect(screen.getByText(/waived, not tested/)).toBeTruthy();
+    expect(screen.getByText("Strategy registry")).toBeTruthy();
+    expect(screen.getByText(/RG-R02: Owner accepted\. UI review waived, not tested\./)).toBeTruthy();
+    expect(screen.getByText(/visual redesign is deferred, not accepted or waived/)).toBeTruthy();
   });
 
-  it("routes the active Feature Studio phase to its workflow while later phases stay planned", async () => {
+  it("keeps accepted Feature Studio usable and shows Strategy Studio as authorized but not started", async () => {
     mockIPC((command) => {
       if (command === "get_foundation_status") return fixtureSnapshot;
       if (command === "get_feature_registry") {
@@ -154,10 +169,13 @@ describe("desktop shell navigation", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Feature Studio" })).toBeTruthy();
     expect(await screen.findByText(/No READY verified dataset is registered/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Strategy Studio/ }));
-    expect(await screen.findByRole("heading", { name: "Strategy Studio is not implemented yet" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Strategy Studio implementation has not started" })).toBeTruthy();
+    expect(screen.getByText("ACTIVE NOT STARTED")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Model Lab/ }));
+    expect(await screen.findByRole("heading", { name: "Model Lab is not implemented yet" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Overview/ }));
     expect(await screen.findByText(/Desktop UI and CSV import review were waived, NOT TESTED/)).toBeTruthy();
-    expect(screen.getByText(/Known UX debt \(unresolved\)/)).toBeTruthy();
+    expect(screen.getAllByText(/Known UX debt \(unresolved\)/)).toHaveLength(3);
   });
 
   it("shows bounded catalog verification progress and cancellation", async () => {

@@ -1,19 +1,19 @@
 schema_version: 3
-current_phase: RG-R02
-builder_status: IMPLEMENTED
-automated_status: AUTOMATED_PASS
+current_phase: RG-R03
+builder_status: NOT_STARTED
+automated_status: NOT_RUN
 owner_ui_status: PENDING
 owner_acceptance: PENDING
 next_phase_unlocked: false
 deliverables:
-  verified_input_authority: TESTED
-  indicator_registry: TESTED
-  causal_feature_engine: TESTED
-  multi_timeframe_joins: TESTED
-  immutable_feature_sets: TESTED
-  resource_controls: TESTED
-  feature_studio_ui: TESTED
-  acceptance_evidence: TESTED
+  verified_feature_input: PLANNED
+  strategy_registry: PLANNED
+  decision_engine: PLANNED
+  causal_context_joins: PLANNED
+  immutable_decision_sets: PLANNED
+  resource_controls: PLANNED
+  strategy_studio_ui: PLANNED
+  acceptance_evidence: PLANNED
 accepted_phases:
   - phase: RG-R00
     owner_acceptance: OWNER_ACCEPTED
@@ -30,3 +30,13 @@ accepted_phases:
     owner_issue_url: https://github.com/maxqstudio/max-tev-ground/issues/2#issuecomment-6269930193
     known_debts:
       - "cancelPreview may report a generic error when cancellation succeeds but registry refresh fails; unresolved UX debt, not fixed or manually tested."
+  - phase: RG-R02
+    owner_acceptance: OWNER_ACCEPTED
+    owner_ui_status: OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED
+    source_sha: 59e0f2e7bd5a875b661bb608d289b3b21b595bd2
+    source_tree_sha: 326b01e72b915746be2134d00a2d0d1fa737d853
+    ci_run_url: https://github.com/maxqstudio/max-tev-ground/actions/runs/39405958946
+    owner_issue_url: https://github.com/maxqstudio/max-tev-ground/issues/4
+    known_debts:
+      - "Manual desktop click-through was NOT_RUN; the Owner waived UI review (UI_REVIEW_WAIVED), so interactive use remains unverified."
+      - "The Owner finds the UI confusing and visually unsatisfactory; visual redesign is deferred, not accepted or waived."

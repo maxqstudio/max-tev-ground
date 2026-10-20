@@ -79,6 +79,10 @@ try {
     $r00 = Find-InFixture "r00-exact" (New-AcceptanceReport "RG-R00" "RG-R00" $commit $tree $true "AUTOMATED_PASS" "PASS") -WithExecutable
     Assert-That ($null -ne $r00) "RG-R00 acceptance for the exact commit was not accepted"
 
+    # RG-R02 is accepted and uses the RG-R01 report layout.
+    $r02 = Find-InFixture "r02-exact" (New-AcceptanceReport "RG-R01" "RG-R02" $commit $tree $true "AUTOMATED_PASS" "PASS") -WithExecutable
+    Assert-That ($null -ne $r02) "RG-R02 acceptance for the exact commit and tree was not accepted"
+
     # Every mismatch below must fail closed.
     $rejections = @(
         @{ Name = "other-commit"; Report = (New-AcceptanceReport "RG-R01" "RG-R01" ("c" * 40) $tree $true "AUTOMATED_PASS" "PASS") },
@@ -86,7 +90,7 @@ try {
         @{ Name = "dirty-source"; Report = (New-AcceptanceReport "RG-R01" "RG-R01" $commit $tree $false "AUTOMATED_PASS" "PASS") },
         @{ Name = "automated-failed"; Report = (New-AcceptanceReport "RG-R01" "RG-R01" $commit $tree $true "FAILED" "PASS") },
         @{ Name = "tauri-gate-failed"; Report = (New-AcceptanceReport "RG-R01" "RG-R01" $commit $tree $true "AUTOMATED_PASS" "FAIL") },
-        @{ Name = "unlisted-phase"; Report = (New-AcceptanceReport "RG-R01" "RG-R02" $commit $tree $true "AUTOMATED_PASS" "PASS") }
+        @{ Name = "unlisted-phase"; Report = (New-AcceptanceReport "RG-R01" "RG-R03" $commit $tree $true "AUTOMATED_PASS" "PASS") }
     )
     foreach ($case in $rejections) {
         $found = Find-InFixture $case.Name $case.Report -WithExecutable

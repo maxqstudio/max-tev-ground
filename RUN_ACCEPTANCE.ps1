@@ -10,7 +10,7 @@ Set-Location -LiteralPath $Root
 
 $StartedUtc = [DateTime]::UtcNow
 $RunId = $StartedUtc.ToString("yyyyMMddTHHmmssZ")
-$EvidenceDir = Join-Path $Root "artifacts\acceptance\rg-r02-$RunId"
+$EvidenceDir = Join-Path $Root "artifacts\acceptance\rg-r03-$RunId"
 New-Item -ItemType Directory -Path $EvidenceDir -Force | Out-Null
 $script:GateResults = [System.Collections.Generic.List[object]]::new()
 $script:StepOutcomes = [ordered]@{}
@@ -88,10 +88,12 @@ if ($LASTEXITCODE -ne 0 -or $tree -notmatch '^[0-9a-f]{40,64}$') {
     throw "Cannot resolve exact Git tree SHA"
 }
 $branch = (git rev-parse --abbrev-ref HEAD).Trim()
-$expectedBranch = "work/rg-r02-feature-studio"
-if ($branch -ne $expectedBranch) {
-    Add-Result "authorized_branch" "FAIL" "expected=$expectedBranch actual=$branch"
-    throw "Acceptance must run on $expectedBranch; found $branch"
+# The RG-R03 candidate branch, plus the governance-only branch that activates RG-R03 (whose phase
+# gates are NOT_RUN because no RG-R03 implementation exists there).
+$expectedBranches = @("work/rg-r03-strategy-engine", "work/rg-r02-closure-rg-r03-activation")
+if ($branch -notin $expectedBranches) {
+    Add-Result "authorized_branch" "FAIL" "expected=$($expectedBranches -join '|') actual=$branch"
+    throw "Acceptance must run on $($expectedBranches -join ' or '); found $branch"
 }
 $script:StepOutcomes["source_check"] = "success"
 [Environment]::SetEnvironmentVariable("RG_STEP_source_check", "success")

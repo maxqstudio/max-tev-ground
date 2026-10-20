@@ -1,52 +1,49 @@
 schema_version: 3
-phase: RG-R02
+phase: RG-R03
 lifecycle: ACTIVE
 deliverables:
-  - verified_input_authority
-  - indicator_registry
-  - causal_feature_engine
-  - multi_timeframe_joins
-  - immutable_feature_sets
+  - verified_feature_input
+  - strategy_registry
+  - decision_engine
+  - causal_context_joins
+  - immutable_decision_sets
   - resource_controls
-  - feature_studio_ui
+  - strategy_studio_ui
   - acceptance_evidence
 acceptance_gates:
-  - id: input_authority
-    requirement: Feature computation accepts only READY verified immutable Data Ground datasets with matching lineage and content hashes.
-    evidence: Tests reject missing, blocked, quarantined, unverified, and tampered dataset identities while preserving the source snapshot unchanged.
-  - id: indicator_registry
-    requirement: Native Rust indicator definitions declare stable identity, version, typed parameters, required inputs, warmup, and deterministic outputs.
-    evidence: Registry tests validate parameter schemas, bounds, warmup requirements, deterministic identities, and supported indicator metadata.
-  - id: causal_availability
-    requirement: Feature rows use only bars available by their explicit UTC decision boundary and never backfill warmup or future values.
-    evidence: Boundary tests cover closed-bar inclusion, open and close timestamps, late data, null warmup, finite output, and causal rolling windows.
-  - id: multi_symbol_timeframe_join
-    requirement: Reference series use deterministic as-of joins with explicit staleness limits and never expose unfinished higher-timeframe bars.
-    evidence: Multi-series tests cover equal timestamps, suffix symbols, missing series, stale references, market calendars, and incomplete H4 bars.
-  - id: feature_materialization
-    requirement: Feature-set identity binds immutable inputs, engine version, parameters, temporal semantics, and canonical output checksums.
-    evidence: Replays, parameter changes, lineage, sorted output, manifest hashes, atomic promotion, and source immutability are verified.
-  - id: resource_controls
-    requirement: Processing is bounded, cancellable, observable, and safe for large datasets without unbounded UI memory use.
-    evidence: Capacity tests verify batches, quotas, cancellation, backpressure, progress, finite values, overflow handling, and failure recovery.
-  - id: feature_studio_ui
-    requirement: The UI provides truthful dataset selection, typed registry configuration, preview, explicit confirmation, progress, cancellation, and lineage inspection.
-    evidence: Tauri and frontend tests exercise asynchronous source-backed flows, errors, cancellation, and resulting feature-set metadata without fixture claims.
-  - id: data_policy
-    requirement: Synthetic fixtures are clearly labeled for deterministic tests and arbitrary MT5 Common files are never selected or treated as trusted research input.
-    evidence: Fixture labels and selection tests prove test data is not presented as market evidence and no automatic filesystem import occurs.
-  - id: golden_vector_math
-    requirement: Indicator formulas, initialization, warmup, and edge cases match independently specified golden vectors.
-    evidence: Hand-calculated or independently implemented vectors cover flat, zero, missing, duplicate, invalid parameter, warmup, and deterministic repeat cases.
-  - id: adversarial_no_lookahead
-    requirement: Future or not-yet-available reference bars cannot alter historical feature values at or before the decision boundary.
-    evidence: Perturbation tests compare prior feature rows and hashes while varying future target and late multi-timeframe reference observations.
-  - id: recovery_and_tamper
-    requirement: Feature persistence recovers transactionally after interruption and rejects tampered outputs or changed immutable identities.
-    evidence: Migration rollback, partial-write restart, checksum tamper, cancel, changed-configuration identity, and idempotent replay tests pass.
+  - id: strategy_input_authority
+    requirement: Strategy evaluation consumes only registered READY RG-R02 feature sets whose manifest, output digest, and source lineage re-verify at consumption and around every read.
+    evidence: Tests reject blocked, quarantined, missing, tampered, stale, and changed-identity feature sets, and prove no feature is recomputed and no market bar is synthesized.
+  - id: typed_strategy_registry
+    requirement: Native Rust strategy definitions declare stable identity, semantic version, typed bounded parameters, required feature fields and source roles, warmup, and threshold equality semantics without hardcoded symbols, suffixes, or timeframes.
+    evidence: Registry tests validate parameter schemas and bounds, required feature bindings, deterministic identities, and reuse of one definition across arbitrary target symbols and timeframes.
+  - id: decision_semantics
+    requirement: Each evaluation emits exactly one BUY, SELL, or SKIP decision per target closed bar with explicit reason codes and input lineage for one chosen target symbol and timeframe.
+    evidence: Golden decisions are compared with hand-calculated independent references, including threshold equality, rule precedence, and deterministic no-signal behavior.
+  - id: causal_no_lookahead
+    requirement: A decision at a target bar uses only feature values available at that bar's UTC closed-bar decision time and never a future row, future label, or unfinished higher-timeframe reference.
+    evidence: Perturbation tests change future target and late reference rows and prove that every earlier decision and its digest is unchanged.
+  - id: mtf_context_only
+    requirement: Reference symbols and timeframes act only as declared context inputs under RG-R02 availability and staleness semantics and never produce independent trade decisions.
+    evidence: Multi-series tests show context markets add no decision rows, stale or absent context yields SKIP with a reason, and suffixed symbols resolve deterministically.
+  - id: skip_and_conflict_handling
+    requirement: Missing, warmup, stale, non-finite, ambiguous, or conflicting inputs yield SKIP with an explicit reason, and BUY and SELL are never emitted together for one bar.
+    evidence: Boundary tests cover every SKIP reason, simultaneous BUY and SELL conditions, duplicated inputs that must not inflate counts, and equality at thresholds.
+  - id: immutable_decision_materialization
+    requirement: Decision-set identity binds strategy definition version, normalized configuration, exact feature-set identities and hashes, and temporal semantics to canonical sorted decision rows with a digest.
+    evidence: Staged preview, explicit confirmation, atomic promotion, idempotent replay with byte-identical output, and new identities for changed parameters or inputs are verified.
+  - id: resource_cancel_recovery
+    requirement: Evaluation streams bounded batches off the UI thread with row quotas, backpressure, progress, cancellation, and safe recovery after interruption without force-killing work.
+    evidence: Capacity, quota, cancellation, interrupted-promotion restart, and error-propagation tests leave no partial registered decision set.
+  - id: desktop_strategy_ipc
+    requirement: The desktop flow selects a trusted feature set, chooses a strategy and typed parameters, validates, previews decisions with SKIP reasons, confirms, and inspects lineage and persisted runs.
+    evidence: Tauri IPC and frontend tests exercise the asynchronous flow, errors, cancellation, and results without layout redesign, and show no separate orders for context markets.
+  - id: adversarial_tamper
+    requirement: Tampered decision outputs, manifests, or source feature sets are quarantined and cannot be consumed or reported as READY.
+    evidence: Checksum tamper, post-registration source tamper, missing-file, and changed-identity tests fail closed with diagnostics naming the affected identity.
   - id: reproducible_acceptance
     requirement: Acceptance evidence records all declared gates against an exact clean commit and tree with source revision and reproducible toolchain.
     evidence: PowerShell and GitHub CI reports, per-gate logs, checksums, artifact identity, workflow status, and source SHA/tree agree exactly.
   - id: owner_ui_acceptance
-    requirement: Owner reviews the RG-R02 Feature Studio workflow separately from automated fixture and IPC tests.
+    requirement: Owner reviews the RG-R03 strategy workflow separately from automated fixture and IPC tests.
     evidence: Manual UI review is explicitly recorded as pending, waived, or accepted and is never inferred from compilation or component tests.
