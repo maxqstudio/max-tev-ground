@@ -63,6 +63,11 @@ RG-R03 is implemented on `work/rg-r03-strategy-engine`, branched from the valida
 - Decision expectations are checked against an independent rule implementation inside the tests, and against hand-calculated golden cases.
 - `causal_no_lookahead`: perturbing future target bars, or context bars that are not yet available, leaves every earlier decision row byte-identical.
 - A mutation check was run before submission. Disabling lineage re-verification, the confirm-time feature-set re-check, or the row-fingerprint comparison each made its gate test fail.
+- The Control Room audit of PR #9 head `86f4aaff03ef6a4237440487d454e9e603dcec48` returned `REPAIR_REQUIRED` ([review #5585758291](https://github.com/maxqstudio/max-tev-ground/pull/9#pullrequestreview-5585758291)). All three defects are repaired on the same branch. Each regression was run against `86f4aaf` and failed, then passed after the repair; the logs are in `artifacts/acceptance/pr9-repair-pre-repair-regressions/`.
+  - P1: starting the application upgraded the Owner database from schema 6 to 7 with no backup, and schema 6 builds then refused it. Every open now takes a verified `VACUUM INTO` backup, including WAL content, before any upgrade. It fails closed without changing the version, and a restore path is tested from the library, the `rg-schema-backup` binary, and `RESTORE_DATABASE_BACKUP.ps1`. Tests cover a populated schema 6 store with WAL content, backup failure, migration failure, restore for a schema 6 build with an unchanged content digest and lineage, and refused unsafe restores.
+  - P2: the output-byte quota ignored the Parquet footer. The final file length is now checked after close.
+  - P2: `TREND_CONTEXT` could turn finite inputs into an infinite difference and a direction. That is now `SKIP` with `NUMERIC_OVERFLOW`, and the golden cases are unchanged.
+- The new desktop executable was still not run against the Owner's real database. Owner and Control Room decide when to take the first verified upgrade.
 - No real historical dataset was used; the Owner's market baseline remains `NOT_VERIFIED_BY_GITHUB_CI`. The Strategy Studio desktop page was exercised only by headless component and IPC tests, and manual Owner UI review is **pending, not tested**. The RG-R01 and RG-R02 UX debts are unchanged.
 
 ## Acceptance runner

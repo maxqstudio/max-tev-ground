@@ -67,7 +67,7 @@ impl DecisionSemantics {
             decision_rows: "Exactly one decision per row of the consumed feature set, that is, per closed bar of its one target symbol and timeframe, in the feature set's ascending decision-time order.".into(),
             causality: "A decision reads only the feature values of its own row, which RG-R02 computed from bars available at that row's decision time. No other row, future value, or label is read, and nothing is recomputed.".into(),
             context: "Reference-series features are context inputs only. They can filter a target decision but never create a decision row of their own.".into(),
-            skip_precedence: "Bound inputs are checked in the definition's role order. The first role whose feature is WARMUP, STALE, or NO_OBSERVATION gives SKIP with that reason; a missing or non-finite READY value gives NON_FINITE_INPUT. Only then is the rule evaluated: CONTEXT_FILTER, then CONFLICT, then BUY, SELL, or NO_SIGNAL.".into(),
+            skip_precedence: "Bound inputs are checked in the definition's role order. The first role whose feature is WARMUP, STALE, or NO_OBSERVATION gives SKIP with that reason; a missing or non-finite READY value gives NON_FINITE_INPUT. Only then is the rule evaluated: CONTEXT_FILTER, then NUMERIC_OVERFLOW when a value the rule derives from finite inputs is not finite, then CONFLICT, then BUY, SELL, or NO_SIGNAL.".into(),
             equality: "Each definition states its comparison semantics; directional thresholds are strict, so equality yields NO_SIGNAL.".into(),
             conflict: "If BUY and SELL conditions both hold for a row, the decision is SKIP with CONFLICT. BUY and SELL are never emitted together.".into(),
         }
@@ -151,6 +151,7 @@ pub enum ReasonCode {
     NoObservation,
     NonFiniteInput,
     ContextFilter,
+    NumericOverflow,
     NoSignal,
     Conflict,
 }
@@ -165,6 +166,7 @@ impl ReasonCode {
             Self::NoObservation => "NO_OBSERVATION",
             Self::NonFiniteInput => "NON_FINITE_INPUT",
             Self::ContextFilter => "CONTEXT_FILTER",
+            Self::NumericOverflow => "NUMERIC_OVERFLOW",
             Self::NoSignal => "NO_SIGNAL",
             Self::Conflict => "CONFLICT",
         }
@@ -186,13 +188,18 @@ pub struct DecisionOutcome {
     pub role_index: Option<usize>,
 }
 
-/// Turns a rule outcome into exactly one decision. BUY and SELL together are a CONFLICT SKIP.
+/// Turns a rule outcome into exactly one decision. BUY and SELL together are a CONFLICT SKIP, and
+/// a non-finite derived value is a NUMERIC_OVERFLOW SKIP whatever directions it implied.
 pub fn combine(outcome: RuleOutcome) -> (Decision, ReasonCode) {
     match outcome {
         RuleOutcome {
             context_blocked: true,
             ..
         } => (Decision::Skip, ReasonCode::ContextFilter),
+        RuleOutcome {
+            numeric_overflow: true,
+            ..
+        } => (Decision::Skip, ReasonCode::NumericOverflow),
         RuleOutcome {
             buy: true,
             sell: true,
@@ -576,20 +583,54 @@ mod tests {
     }
 
     #[test]
+    fn gate_skip_and_conflict_handling_finite_inputs_with_non_finite_difference_never_give_a_direction(
+    ) {
+        let trend = StrategyConfig::TrendContext {
+            margin: 0.0,
+            context_min: 0.0,
+            context_max: 100.0,
+        };
+        // Each input is finite, but fast - slow and slow - fast overflow to +/-infinity.
+        for (fast, slow) in [(f64::MAX, -f64::MAX), (-f64::MAX, f64::MAX)] {
+            let outcome = decide(&trend, &[ready(fast), ready(slow), ready(50.0)]).unwrap();
+            assert_eq!(outcome.decision, Decision::Skip, "{fast} vs {slow}");
+            assert_eq!(outcome.reason, ReasonCode::NumericOverflow);
+            assert_eq!(outcome.role_index, None);
+        }
+        // A context block is decided before any arithmetic.
+        let blocked = decide(&trend, &[ready(f64::MAX), ready(-f64::MAX), ready(150.0)]).unwrap();
+        assert_eq!(blocked.reason, ReasonCode::ContextFilter);
+        // Large finite values whose difference stays finite keep their direction.
+        let outcome = decide(
+            &trend,
+            &[ready(f64::MAX), ready(f64::MAX / 2.0), ready(50.0)],
+        )
+        .unwrap();
+        assert_eq!(outcome.decision, Decision::Buy);
+    }
+
+    #[test]
     fn gate_skip_and_conflict_handling_buy_and_sell_together_are_a_conflict_skip() {
         let both = RuleOutcome {
             buy: true,
             sell: true,
-            context_blocked: false,
+            ..RuleOutcome::default()
         };
         assert_eq!(combine(both), (Decision::Skip, ReasonCode::Conflict));
-        // A context block outranks any direction.
+        // A context block and a numeric overflow each outrank any direction.
         assert_eq!(
             combine(RuleOutcome {
                 context_blocked: true,
                 ..both
             }),
             (Decision::Skip, ReasonCode::ContextFilter)
+        );
+        assert_eq!(
+            combine(RuleOutcome {
+                numeric_overflow: true,
+                ..both
+            }),
+            (Decision::Skip, ReasonCode::NumericOverflow)
         );
         for (buy, sell, expected) in [
             (true, false, (Decision::Buy, ReasonCode::BuyRule)),
@@ -600,7 +641,7 @@ mod tests {
                 combine(RuleOutcome {
                     buy,
                     sell,
-                    context_blocked: false
+                    ..RuleOutcome::default()
                 }),
                 expected
             );

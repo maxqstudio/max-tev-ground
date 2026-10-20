@@ -37,6 +37,12 @@ pub enum PersistenceError {
     DecisionSetAlreadyExists(String),
     #[error("decision set metadata is invalid: {0}")]
     InvalidDecisionSetMetadata(String),
+    #[error("schema upgrade was not started because the pre-upgrade backup failed: {0}")]
+    SchemaBackupFailed(String),
+    #[error("schema backup restore was refused or failed: {0}")]
+    SchemaRestoreFailed(String),
+    #[error("filesystem error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Clone, Copy)]
@@ -372,11 +378,376 @@ pub struct ImportAttemptRecord {
     pub diagnostic_message: Option<String>,
 }
 
+/// Opens the research database and brings it to the current schema. An existing store below the
+/// current schema is first copied to a verified backup (see [`backup_before_upgrade`]); if that
+/// fails, the store is left at its version and the open fails.
 pub fn open_database(path: impl AsRef<Path>) -> Result<Connection, PersistenceError> {
+    open_database_with(path.as_ref(), MIGRATIONS, CURRENT_SCHEMA_VERSION)
+}
+
+fn open_database_with(
+    path: &Path,
+    migrations: &[Migration],
+    supported_version: u32,
+) -> Result<Connection, PersistenceError> {
     let mut connection = Connection::open(path)?;
     configure(&connection)?;
-    migrate(&mut connection)?;
+    let current = schema_version(&connection)?;
+    if current > 0 && current < supported_version {
+        backup_before_upgrade(&connection, path, current)?;
+    }
+    migrate_with(&mut connection, migrations, supported_version)?;
     Ok(connection)
+}
+
+/// Directory, beside the database, that holds verified pre-upgrade backups.
+pub const SCHEMA_BACKUP_DIRECTORY: &str = "schema-backups";
+
+/// A verified, consistent copy of a database taken before a schema upgrade.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaBackup {
+    pub path: std::path::PathBuf,
+    pub schema_version: u32,
+    /// SHA-256 over every schema object and row, in a canonical order. Equal digests mean equal
+    /// logical content, independent of page layout or journal mode.
+    pub content_sha256: String,
+}
+
+/// Result of restoring a schema backup over a database.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoredDatabase {
+    pub schema_version: u32,
+    pub content_sha256: String,
+    /// The database files that were moved aside, never deleted.
+    pub preserved: Vec<std::path::PathBuf>,
+}
+
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    format!("{nanos}-{}", std::process::id())
+}
+
+fn backup_directory(database_path: &Path) -> Result<std::path::PathBuf, PersistenceError> {
+    let parent = database_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok(parent.join(SCHEMA_BACKUP_DIRECTORY))
+}
+
+/// Logical SHA-256 of a database: every non-internal schema object (type, name, table, SQL) and
+/// every row of every table, in name and rowid order, with typed, length-prefixed values.
+pub fn database_content_sha256(connection: &Connection) -> Result<String, PersistenceError> {
+    use rusqlite::types::ValueRef;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let field = |hasher: &mut Sha256, bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    };
+    let objects: Vec<(String, String, String, Option<String>)> = {
+        let mut statement = connection.prepare(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for (kind, name, table, sql) in &objects {
+        field(&mut hasher, kind.as_bytes());
+        field(&mut hasher, name.as_bytes());
+        field(&mut hasher, table.as_bytes());
+        field(&mut hasher, sql.as_deref().unwrap_or_default().as_bytes());
+    }
+    for (_, name, _, _) in objects.iter().filter(|object| object.0 == "table") {
+        let mut statement = connection.prepare(&format!(
+            "SELECT * FROM \"{}\" ORDER BY rowid",
+            name.replace('"', "\"\"")
+        ))?;
+        let columns = statement.column_count();
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            hasher.update([0xff]);
+            for index in 0..columns {
+                match row.get_ref(index)? {
+                    ValueRef::Null => hasher.update([0]),
+                    ValueRef::Integer(value) => {
+                        hasher.update([1]);
+                        hasher.update(value.to_be_bytes());
+                    }
+                    ValueRef::Real(value) => {
+                        hasher.update([2]);
+                        hasher.update(value.to_bits().to_be_bytes());
+                    }
+                    ValueRef::Text(value) => {
+                        hasher.update([3]);
+                        field(&mut hasher, value);
+                    }
+                    ValueRef::Blob(value) => {
+                        hasher.update([4]);
+                        field(&mut hasher, value);
+                    }
+                }
+            }
+        }
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Opens a backup or candidate file read-only and returns its schema version and content
+/// digest after SQLite's full integrity check passes.
+fn verified_snapshot(path: &Path) -> Result<(u32, String), String> {
+    let connection = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| format!("integrity check failed: {error}"))?;
+    if integrity != "ok" {
+        return Err(format!("integrity check reported: {integrity}"));
+    }
+    let version = schema_version(&connection).map_err(|error| error.to_string())?;
+    let digest = database_content_sha256(&connection).map_err(|error| error.to_string())?;
+    Ok((version, digest))
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+}
+
+/// Writes a consistent copy of the open database to the backup directory and verifies it before
+/// any schema change. `VACUUM INTO` reads through the connection, so committed content that is
+/// still only in the WAL file is included. A full disk or any other write failure surfaces as an
+/// error here, before the upgrade starts. The copy must pass SQLite's integrity check and match the
+/// source's schema version and logical content digest; otherwise it is removed and the upgrade is
+/// refused.
+pub fn backup_before_upgrade(
+    connection: &Connection,
+    database_path: &Path,
+    schema_version_before: u32,
+) -> Result<SchemaBackup, PersistenceError> {
+    let failed = |reason: String| PersistenceError::SchemaBackupFailed(reason);
+    let directory = backup_directory(database_path)?;
+    match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(failed(format!(
+                "{} exists but is not a private directory",
+                directory.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&directory).map_err(|error| {
+                failed(format!("cannot create {}: {error}", directory.display()))
+            })?
+        }
+        Err(error) => return Err(failed(error.to_string())),
+    }
+    let stem = database_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("research.sqlite3");
+    let target = directory.join(format!(
+        "{stem}.schema-v{schema_version_before}.{}.sqlite3",
+        unique_suffix()
+    ));
+    let target_text = target
+        .to_str()
+        .ok_or_else(|| failed("backup path is not valid UTF-8".into()))?;
+    let source_digest = database_content_sha256(connection)?;
+    let result = connection
+        .execute("VACUUM INTO ?1", [target_text])
+        .map_err(|error| failed(format!("could not write {}: {error}", target.display())))
+        .and_then(|_| verified_snapshot(&target).map_err(failed))
+        .and_then(|(version, digest)| {
+            if version != schema_version_before || digest != source_digest {
+                Err(failed(
+                    "backup does not reproduce the source schema version and content".into(),
+                ))
+            } else {
+                Ok(digest)
+            }
+        });
+    match result {
+        Ok(content_sha256) => Ok(SchemaBackup {
+            path: target,
+            schema_version: schema_version_before,
+            content_sha256,
+        }),
+        Err(error) => {
+            let _ = std::fs::remove_file(&target);
+            Err(error)
+        }
+    }
+}
+
+/// Lists pre-upgrade backups beside a database, oldest first.
+pub fn list_schema_backups(
+    database_path: &Path,
+) -> Result<Vec<std::path::PathBuf>, PersistenceError> {
+    let directory = backup_directory(database_path)?;
+    let mut backups = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    backups.retain(|path| {
+        is_regular_file(path)
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "sqlite3")
+    });
+    backups.sort();
+    Ok(backups)
+}
+
+/// Restores a verified pre-upgrade backup as the database, for example so a previously accepted
+/// application build can open it again. The application must be closed: the restore is refused
+/// while any connection keeps the database busy. The current database, WAL, and shared-memory
+/// files are renamed aside, never deleted, and the installed copy is verified against the
+/// backup's version and content digest.
+pub fn restore_schema_backup(
+    database_path: &Path,
+    backup_path: &Path,
+) -> Result<RestoredDatabase, PersistenceError> {
+    let refused = |reason: String| PersistenceError::SchemaRestoreFailed(reason);
+    let directory = std::fs::canonicalize(backup_directory(database_path)?)
+        .map_err(|error| refused(format!("no schema backup directory: {error}")))?;
+    let backup = std::fs::canonicalize(backup_path)
+        .map_err(|error| refused(format!("backup is not readable: {error}")))?;
+    if backup.parent() != Some(directory.as_path()) || !is_regular_file(&backup) {
+        return Err(refused(
+            "backup must be a regular file in the database's schema-backups directory".into(),
+        ));
+    }
+    let (version, digest) = verified_snapshot(&backup).map_err(refused)?;
+    if version == 0 || version > CURRENT_SCHEMA_VERSION {
+        return Err(refused(format!(
+            "backup has unsupported schema version {version}"
+        )));
+    }
+
+    // Early refusal when a checkpoint cannot complete. It does not catch every open connection;
+    // the file moves below are the authoritative check and undo themselves on failure.
+    if is_regular_file(database_path) {
+        let connection = Connection::open(database_path)?;
+        let busy: i64 = connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .map_err(|error| refused(format!("database is in use: {error}")))?;
+        if busy != 0 {
+            return Err(refused(
+                "database is in use; close the application before restoring".into(),
+            ));
+        }
+    }
+
+    let suffix = unique_suffix();
+    let candidate = database_path.with_file_name(format!(
+        "{}.restore-{suffix}.tmp",
+        database_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("research.sqlite3")
+    ));
+    {
+        let source =
+            Connection::open_with_flags(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let candidate_text = candidate
+            .to_str()
+            .ok_or_else(|| refused("database path is not valid UTF-8".into()))?;
+        source
+            .execute("VACUUM INTO ?1", [candidate_text])
+            .map_err(|error| refused(format!("could not stage the restore: {error}")))?;
+    }
+    match verified_snapshot(&candidate) {
+        Ok((candidate_version, candidate_digest))
+            if candidate_version == version && candidate_digest == digest => {}
+        _ => {
+            let _ = std::fs::remove_file(&candidate);
+            return Err(refused("staged restore does not match the backup".into()));
+        }
+    }
+
+    let mut preserved = Vec::new();
+    let aside = |path: &Path| {
+        path.with_file_name(format!(
+            "{}.pre-restore-{suffix}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("database")
+        ))
+    };
+    let wal = database_path.with_file_name(format!(
+        "{}-wal",
+        database_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("research.sqlite3")
+    ));
+    let shm = database_path.with_file_name(format!(
+        "{}-shm",
+        database_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("research.sqlite3")
+    ));
+    for path in [database_path.to_path_buf(), wal, shm] {
+        if std::fs::symlink_metadata(&path).is_ok() {
+            let destination = aside(&path);
+            if let Err(error) = std::fs::rename(&path, &destination) {
+                // Put back whatever was already moved, then fail without touching anything else.
+                for (original, moved) in preserved.iter().rev() {
+                    let _ = std::fs::rename(moved, original);
+                }
+                let _ = std::fs::remove_file(&candidate);
+                // Windows refuses to rename a file another process or connection holds open
+                // (sharing or lock violation): the authoritative "in use" signal.
+                let reason = if matches!(error.raw_os_error(), Some(32 | 33)) {
+                    format!(
+                        "database is in use; close the application before restoring ({})",
+                        path.display()
+                    )
+                } else {
+                    format!("could not move {} aside: {error}", path.display())
+                };
+                return Err(refused(reason));
+            }
+            preserved.push((path, destination));
+        }
+    }
+    if let Err(error) = std::fs::rename(&candidate, database_path) {
+        for (original, moved) in preserved.iter().rev() {
+            let _ = std::fs::rename(moved, original);
+        }
+        return Err(refused(format!(
+            "could not install the restored database: {error}"
+        )));
+    }
+    let (restored_version, restored_digest) = verified_snapshot(database_path).map_err(refused)?;
+    if restored_version != version || restored_digest != digest {
+        return Err(refused(
+            "restored database does not match the backup; the previous files were preserved".into(),
+        ));
+    }
+    Ok(RestoredDatabase {
+        schema_version: version,
+        content_sha256: digest,
+        preserved: preserved.into_iter().map(|(_, moved)| moved).collect(),
+    })
 }
 
 pub fn configure(connection: &Connection) -> Result<(), PersistenceError> {
@@ -392,6 +763,19 @@ pub fn schema_version(connection: &Connection) -> Result<u32, PersistenceError> 
 
 pub fn migrate(connection: &mut Connection) -> Result<u32, PersistenceError> {
     migrate_with(connection, MIGRATIONS, CURRENT_SCHEMA_VERSION)
+}
+
+/// Brings a connection to an older schema version, as a previously accepted build would leave it.
+/// For upgrade and restore tests only.
+#[doc(hidden)]
+pub fn migrate_to_version_for_tests(
+    connection: &mut Connection,
+    version: u32,
+) -> Result<u32, PersistenceError> {
+    let count = usize::try_from(version)
+        .unwrap_or(usize::MAX)
+        .min(MIGRATIONS.len());
+    migrate_with(connection, &MIGRATIONS[..count], version)
 }
 
 fn migrate_with(
@@ -2646,5 +3030,199 @@ mod tests {
 
         assert_eq!(migrate(&mut connection).unwrap(), CURRENT_SCHEMA_VERSION);
         assert_eq!(decision_tables(&connection), 3);
+    }
+
+    /// A schema 6 store, as the accepted RG-R02 application leaves it, holding a dataset and a
+    /// feature set. The returned writer stays open so its committed rows remain in the WAL file
+    /// rather than being checkpointed into the main database file.
+    fn populated_v6_store(directory: &Path) -> (std::path::PathBuf, Connection) {
+        let path = directory.join("research.sqlite3");
+        let mut writer = Connection::open(&path).unwrap();
+        configure(&writer).unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        assert_eq!(migrate_with(&mut writer, &MIGRATIONS[..6], 6).unwrap(), 6);
+        registered_feature_set(&mut writer);
+        let wal = directory.join("research.sqlite3-wal");
+        assert!(
+            std::fs::metadata(&wal).unwrap().len() > 0,
+            "fixture rows must be in the WAL"
+        );
+        (path, writer)
+    }
+
+    fn row_count(connection: &Connection, table: &str) -> u32 {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_schema_upgrade_backs_up_populated_v6_with_wal_content() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (path, _writer) = populated_v6_store(directory.path());
+        let upgraded = open_database(&path).unwrap();
+        assert_eq!(schema_version(&upgraded).unwrap(), CURRENT_SCHEMA_VERSION);
+
+        let backups: Vec<_> = std::fs::read_dir(directory.path().join("schema-backups"))
+            .expect("a schema 6 store must be backed up before it is upgraded")
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(backups.len(), 1);
+        let backup =
+            Connection::open_with_flags(&backups[0], rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        assert_eq!(schema_version(&backup).unwrap(), 6);
+        // Rows that existed only in the WAL at upgrade time are in the backup.
+        assert_eq!(row_count(&backup, "datasets"), 1);
+        assert_eq!(row_count(&backup, "feature_sets"), 1);
+        assert_eq!(row_count(&backup, "feature_set_inputs"), 1);
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_schema_upgrade_fails_closed_when_backup_cannot_be_written() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (path, writer) = populated_v6_store(directory.path());
+        // A regular file where the backup directory belongs makes the backup impossible.
+        std::fs::write(directory.path().join("schema-backups"), b"not a directory").unwrap();
+        assert!(open_database(&path).is_err());
+        assert_eq!(
+            schema_version(&writer).unwrap(),
+            6,
+            "the store must not be upgraded"
+        );
+        assert_eq!(row_count(&writer, "datasets"), 1);
+        assert_eq!(row_count(&writer, "feature_sets"), 1);
+    }
+
+    /// Opens the store as the accepted RG-R02 build would: it knows migrations 1-6 only.
+    fn open_as_schema_six_build(path: &Path) -> Result<Connection, PersistenceError> {
+        open_database_with(path, &MIGRATIONS[..6], 6)
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_schema_upgrade_restores_v6_for_the_prior_build_unchanged() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (path, writer) = populated_v6_store(directory.path());
+        let v6_digest = database_content_sha256(&writer).unwrap();
+        let dataset_id = format!("ds_{}", "a".repeat(64));
+        let feature_set_id = format!("fs_{}", "f".repeat(64));
+        let dataset = get_dataset_metadata(&writer, &dataset_id).unwrap();
+        let feature_set = get_feature_set_metadata(&writer, &feature_set_id).unwrap();
+        drop(writer);
+
+        // Upgrading adds schema 7 without touching existing dataset or feature lineage.
+        let upgraded = open_database(&path).unwrap();
+        assert_eq!(
+            get_dataset_metadata(&upgraded, &dataset_id).unwrap(),
+            dataset
+        );
+        assert_eq!(
+            get_feature_set_metadata(&upgraded, &feature_set_id).unwrap(),
+            feature_set
+        );
+        drop(upgraded);
+        assert!(matches!(
+            open_as_schema_six_build(&path),
+            Err(PersistenceError::FutureSchema {
+                found: 7,
+                supported: 6
+            })
+        ));
+
+        let backups = list_schema_backups(&path).unwrap();
+        assert_eq!(backups.len(), 1);
+        let restored = restore_schema_backup(&path, &backups[0]).unwrap();
+        assert_eq!(restored.schema_version, 6);
+        assert_eq!(restored.content_sha256, v6_digest);
+        assert!(restored.preserved.iter().all(|moved| moved.exists()));
+        assert!(
+            !restored.preserved.is_empty(),
+            "the upgraded files are kept, not deleted"
+        );
+
+        let reopened = open_as_schema_six_build(&path).unwrap();
+        assert_eq!(schema_version(&reopened).unwrap(), 6);
+        assert_eq!(database_content_sha256(&reopened).unwrap(), v6_digest);
+        assert_eq!(
+            get_dataset_metadata(&reopened, &dataset_id).unwrap(),
+            dataset
+        );
+        assert_eq!(
+            get_feature_set_metadata(&reopened, &feature_set_id).unwrap(),
+            feature_set
+        );
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_failed_schema_upgrade_keeps_v6_and_a_verified_backup() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (path, writer) = populated_v6_store(directory.path());
+        let v6_digest = database_content_sha256(&writer).unwrap();
+        let mut broken = MIGRATIONS[..6].to_vec();
+        broken.push(Migration {
+            version: 7,
+            name: "intentional_upgrade_failure_fixture",
+            sql: "CREATE TABLE decision_sets(id INTEGER); INSERT INTO missing_table VALUES (1);",
+        });
+        assert!(open_database_with(&path, &broken, 7).is_err());
+        assert_eq!(schema_version(&writer).unwrap(), 6);
+        assert_eq!(database_content_sha256(&writer).unwrap(), v6_digest);
+        let backups = list_schema_backups(&path).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(verified_snapshot(&backups[0]).unwrap(), (6, v6_digest));
+        drop(writer);
+        assert!(open_as_schema_six_build(&path).is_ok());
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_schema_restore_refuses_unsafe_requests() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (path, writer) = populated_v6_store(directory.path());
+        drop(writer);
+        drop(open_database(&path).unwrap());
+        let backup = list_schema_backups(&path).unwrap().remove(0);
+
+        // In use: a reader holding a transaction keeps a full checkpoint from completing.
+        let reader = Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM datasets;")
+            .unwrap();
+        let in_use = restore_schema_backup(&path, &backup);
+        assert!(
+            matches!(&in_use, Err(PersistenceError::SchemaRestoreFailed(reason)) if reason.contains("in use")),
+            "{in_use:?}"
+        );
+        reader.execute_batch("COMMIT").unwrap();
+        drop(reader);
+
+        // Outside the backup directory, and a corrupted backup.
+        let outside = directory.path().join("copied-backup.sqlite3");
+        std::fs::copy(&backup, &outside).unwrap();
+        assert!(restore_schema_backup(&path, &outside).is_err());
+        let corrupted = backup.with_file_name("research.sqlite3.schema-v6.corrupted.sqlite3");
+        let mut bytes = std::fs::read(&backup).unwrap();
+        for byte in bytes.iter_mut().skip(100).take(4000) {
+            *byte ^= 0x5a;
+        }
+        std::fs::write(&corrupted, bytes).unwrap();
+        assert!(restore_schema_backup(&path, &corrupted).is_err());
+
+        // Every refusal left the upgraded store in place.
+        assert_eq!(
+            schema_version(&open_database(&path).unwrap()).unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_schema_backup_is_only_taken_for_an_existing_older_store() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("research.sqlite3");
+        drop(open_database(&path).unwrap());
+        drop(open_database(&path).unwrap());
+        assert!(list_schema_backups(&path).unwrap().is_empty());
+        assert!(!directory.path().join(SCHEMA_BACKUP_DIRECTORY).exists());
     }
 }

@@ -107,7 +107,7 @@ static DEFINITIONS: [StrategyDefinition; 2] = [
         version: 1,
         name: "Trend with context filter",
         description: "Compares a fast and a slow target-series feature, gated by a reference-market context feature.",
-        decision_rule: "SKIP with CONTEXT_FILTER when context is outside [context_min, context_max]; else BUY when fast - slow > margin, SELL when slow - fast > margin, otherwise SKIP with NO_SIGNAL.",
+        decision_rule: "SKIP with CONTEXT_FILTER when context is outside [context_min, context_max]; SKIP with NUMERIC_OVERFLOW when fast - slow is not finite; else BUY when fast - slow > margin, SELL when slow - fast > margin, otherwise SKIP with NO_SIGNAL.",
         equality_semantics: "Trend comparisons are strict: a difference equal to margin is NO_SIGNAL. The context band is inclusive. context_min must not exceed context_max.",
         warmup_rule: "No extra warmup; a row is SKIP while any bound feature is WARMUP, STALE, or not yet observed.",
         bindings: &[
@@ -173,12 +173,14 @@ pub enum StrategyConfig {
 }
 
 /// What a rule concluded from finite, available inputs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuleOutcome {
     pub buy: bool,
     pub sell: bool,
     /// A context input was outside its allowed range; no direction may be emitted.
     pub context_blocked: bool,
+    /// A value derived from finite inputs was not finite; no direction may be emitted.
+    pub numeric_overflow: bool,
 }
 
 impl StrategyConfig {
@@ -191,7 +193,7 @@ impl StrategyConfig {
                 RuleOutcome {
                     buy: signal > upper,
                     sell: signal < lower,
-                    context_blocked: false,
+                    ..RuleOutcome::default()
                 }
             }
             Self::TrendContext {
@@ -202,15 +204,23 @@ impl StrategyConfig {
                 let (fast, slow, context) = (inputs[0], inputs[1], inputs[2]);
                 if !(context_min..=context_max).contains(&context) {
                     return RuleOutcome {
-                        buy: false,
-                        sell: false,
                         context_blocked: true,
+                        ..RuleOutcome::default()
+                    };
+                }
+                // Finite inputs can still overflow when subtracted; that is not a direction.
+                // IEEE-754 subtraction is sign-symmetric, so slow - fast is exactly -(fast - slow).
+                let difference = fast - slow;
+                if !difference.is_finite() {
+                    return RuleOutcome {
+                        numeric_overflow: true,
+                        ..RuleOutcome::default()
                     };
                 }
                 RuleOutcome {
-                    buy: fast - slow > margin,
-                    sell: slow - fast > margin,
-                    context_blocked: false,
+                    buy: difference > margin,
+                    sell: -difference > margin,
+                    ..RuleOutcome::default()
                 }
             }
         }
@@ -422,6 +432,7 @@ mod tests {
             buy,
             sell,
             context_blocked,
+            numeric_overflow: false,
         };
         // (signal, expected): strictly above 70 is BUY, strictly below 30 is SELL, the band
         // including both edges is NO_SIGNAL.
@@ -456,6 +467,16 @@ mod tests {
                 trend.evaluate(&[fast, slow, context]),
                 expected,
                 "{fast} {slow} {context}"
+            );
+        }
+        // Finite inputs whose difference overflows give no direction in either order.
+        for (fast, slow) in [(f64::MAX, -f64::MAX), (-f64::MAX, f64::MAX)] {
+            assert_eq!(
+                trend.evaluate(&[fast, slow, 50.0]),
+                RuleOutcome {
+                    numeric_overflow: true,
+                    ..RuleOutcome::default()
+                }
             );
         }
     }

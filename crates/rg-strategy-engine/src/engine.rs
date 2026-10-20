@@ -10,7 +10,7 @@ use std::{
     collections::VecDeque,
     fs::File,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc,
@@ -301,6 +301,7 @@ struct DecisionWriter {
     inputs: Vec<Vec<Option<f64>>>,
     hasher: Sha256,
     max_output_bytes: u64,
+    path: PathBuf,
 }
 
 impl DecisionWriter {
@@ -337,6 +338,7 @@ impl DecisionWriter {
             inputs: vec![Vec::with_capacity(WRITE_BATCH_ROWS); request.columns.len()],
             hasher: Sha256::new(),
             max_output_bytes: request.quotas.max_output_bytes,
+            path: path.to_path_buf(),
         })
     }
 
@@ -408,9 +410,18 @@ impl DecisionWriter {
         Ok(())
     }
 
+    /// Closes the file and enforces the quota on its final physical length: the Parquet footer
+    /// is written by `close`, after the per-batch checks in `flush`.
     fn finish(mut self) -> Result<String, StrategyError> {
         self.flush()?;
         self.writer.close()?;
+        let final_bytes = std::fs::metadata(&self.path)?.len();
+        if final_bytes > self.max_output_bytes {
+            return Err(StrategyError::ResourceQuota(format!(
+                "decision output is {final_bytes} bytes including its footer; the quota is {}",
+                self.max_output_bytes
+            )));
+        }
         Ok(hex(self.hasher.finalize()))
     }
 }

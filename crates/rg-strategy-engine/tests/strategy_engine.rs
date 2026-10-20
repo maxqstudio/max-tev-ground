@@ -606,6 +606,40 @@ fn gate_resource_cancel_recovery_quotas_and_cancellation_leave_nothing_registere
         .is_empty());
 }
 
+#[test]
+fn gate_resource_cancel_recovery_output_quota_bounds_the_final_file_including_its_footer() {
+    let fixture = Fixture::new();
+    let feature_set = trend_feature_set(&fixture, "output-quota", &market_bars(0.0, 1.0));
+    let final_size = {
+        let prepared = fixture.prepare(&band_request(&feature_set)).unwrap();
+        let size = std::fs::metadata(prepared.staging_directory.join("decisions.parquet"))
+            .unwrap()
+            .len();
+        fixture.store().discard_prepared(prepared).unwrap();
+        size
+    };
+    let mut just_below = band_request(&feature_set);
+    just_below.quotas.max_output_bytes = final_size - 1;
+    assert!(
+        matches!(
+            fixture.prepare(&just_below),
+            Err(StrategyError::ResourceQuota(_))
+        ),
+        "a {final_size}-byte output must not pass a {}-byte quota",
+        final_size - 1
+    );
+    assert_eq!(fixture.staging_entries(), 0);
+    let mut exact = band_request(&feature_set);
+    exact.quotas.max_output_bytes = final_size;
+    let prepared = fixture.prepare(&exact).unwrap();
+    assert_eq!(
+        std::fs::metadata(prepared.staging_directory.join("decisions.parquet"))
+            .unwrap()
+            .len(),
+        final_size
+    );
+}
+
 fn journal(fixture: &Fixture, prepared: &PreparedDecisionSet) {
     let manifest = &prepared.manifest;
     let connection = open_database(fixture.root.join("research.sqlite3")).unwrap();

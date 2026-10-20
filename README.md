@@ -23,6 +23,17 @@ Run `.\INSTALL_DESKTOP_SHORTCUT.ps1` once to create a Windows desktop shortcut, 
 
 `-WhatIf` previews the launch path without opening the GUI. Do not use the desktop launch as a substitute for the acceptance runner.
 
+### Upgrade warning: database schema 7
+
+A build that includes RG-R03 upgrades an existing research database from schema 6 to 7 on its first start, and builds that only know schema 6 cannot open the upgraded store. Before the upgrade, the application writes a verified backup to `schema-backups\` beside the database (`%APPDATA%\com.max.research-ground\` for the desktop app). If that backup fails, the store is left at schema 6 and the application does not start. To return to a schema 6 build, close the application, then:
+
+```powershell
+.\RESTORE_DATABASE_BACKUP.ps1                       # lists the backups
+.\RESTORE_DATABASE_BACKUP.ps1 -Backup <listed path>  # restores one; asks for confirmation, -WhatIf previews
+```
+
+The restore moves the current database files aside under a `.pre-restore-*` name; it never deletes them. Anything recorded after the upgrade is only in those preserved files.
+
 ## RG-R01 Data Ground (accepted)
 
 The Data Ground page imports user-selected local CSV or Parquet OHLCV files. It supports mapped timestamps, explicit UTC interpretation, market roles, multiple symbols and timeframes, broker/server provenance, quota limits, missing-interval audit, and a preview that must be explicitly confirmed before registry promotion. Registered snapshots keep the original source bytes and canonical sorted Parquet with SHA-256 identities. Catalogue verification streams through the snapshots on one background worker, reports progress, supports cancellation, and exposes a dataset as `READY` only after its hashes verify. A pending promotion journal recovers confirmed imports after interruption; ambiguous files are preserved and fail closed. Invalid, duplicate, descending, or unclassified data is rejected or marked blocked, and candles are never filled synthetically.

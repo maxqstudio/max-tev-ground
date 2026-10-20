@@ -35,7 +35,7 @@ The executable Rust contract is `rg-strategy-engine::spec`. A `DecisionSetReques
   - There is exactly one decision per feature-set row, that is, per closed bar of the target series, in ascending decision-time order.
   - A decision reads only its own row's feature values, which RG-R02 already made causal. Nothing is recomputed, joined, or read from another row.
   - Reference features are context only and never create decision rows.
-  - Precedence: roles are checked in definition order, and the first `WARMUP`, `STALE`, or `NO_OBSERVATION` input gives `SKIP` with that reason and role. A missing or non-finite `READY` value gives `NON_FINITE_INPUT`. Only then does the rule run: `CONTEXT_FILTER` first, then `CONFLICT` when the BUY and SELL conditions both hold, then `BUY_RULE`, `SELL_RULE`, or `NO_SIGNAL`.
+  - Precedence: roles are checked in definition order, and the first `WARMUP`, `STALE`, or `NO_OBSERVATION` input gives `SKIP` with that reason and role. A missing or non-finite `READY` value gives `NON_FINITE_INPUT`. Only then does the rule run: `CONTEXT_FILTER` first, then `NUMERIC_OVERFLOW` when a value the rule derives from finite inputs is not finite (for example `fast - slow` overflowing), then `CONFLICT` when the BUY and SELL conditions both hold, then `BUY_RULE`, `SELL_RULE`, or `NO_SIGNAL`.
   - Directional comparisons are strict; the `TREND_CONTEXT` context band is inclusive.
 - Identity: `decision_set_id = "dc_" + sha256(DecisionSetIdentity)`. The identity binds:
   - the schema version and the engine ID and version;
@@ -51,10 +51,15 @@ The executable Rust contract is `rg-strategy-engine::spec`. A `DecisionSetReques
   - one nullable `input__<role>` float per role, holding the exact registered value a decision used.
 
   The manifest records the output SHA-256, a row-level output fingerprint, BUY/SELL/SKIP counts with SKIP reasons, the target and context series, the feature set and its dataset lineage, and `READY` status.
-- Quotas: `max_rows` bounds decision rows and is checked before evaluation and per row; `max_output_bytes` bounds the output file. Any excess fails as `RESOURCE_QUOTA`.
+- Quotas: `max_rows` bounds decision rows and is checked before evaluation and per row. `max_output_bytes` bounds the output file: it is checked while batches are written, and again on the file's final physical length after the Parquet footer is written. Any excess fails as `RESOURCE_QUOTA`, and the staged output is removed.
 - SQLite schema 7 adds an immutable `decision_sets` table (foreign key to `feature_sets`, recording the feature-set manifest SHA-256), a `decision_set_promotions` journal, and immutable `decision_attempts`.
   - Every catalogue read (`list_decision_sets`, `inspect_decision_set`) rechecks the manifest and output digest. It also re-verifies the consumed feature set through `FeatureStore`, and thereby every source dataset.
   - A feature set that is missing, changed, or not `READY` makes the decision set `QUARANTINED`, with a diagnostic naming the feature set.
   - Confirmation re-verifies the feature set first, so a change between preview and confirm fails closed.
   - `StrategyStore::output_path` returns a path only for a `READY` decision set.
+- Schema upgrade safety: `open_database`, the only way any store opens the database, never upgrades an existing store without a verified backup.
+  - Before migrating a store below the current schema, it writes `schema-backups/<db>.schema-v<N>.<id>.sqlite3` with SQLite `VACUUM INTO`. This reads through the live connection, so committed content still in the WAL is included.
+  - The backup must pass `PRAGMA integrity_check`, have the source's schema version, and reproduce the source's logical content SHA-256, which covers every schema object and row. Otherwise it is removed and the open fails before any version change. A full disk surfaces as a failed write at this step.
+  - A failed migration rolls back and leaves the store at its old version, with the verified backup kept.
+  - `restore_schema_backup` (`rg-schema-backup restore`, `RESTORE_DATABASE_BACKUP.ps1`) re-verifies a backup from that directory and refuses while the database is in use. It renames the current database, WAL, and shared-memory files aside (never deleting them), installs a verified copy, and checks it against the backup's version and digest. This lets a schema 6 build reopen the store with its dataset and feature-set content unchanged.
 - Decisions are research records. Nothing in this contract places, sizes, routes, or simulates an order, or computes a position, PnL, backtest, or performance metric.
