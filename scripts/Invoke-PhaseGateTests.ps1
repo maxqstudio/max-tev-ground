@@ -57,6 +57,26 @@ function Get-VitestCounts([string]$LogPath) {
     return @([int]("0$passed"), [int]("0$failed"))
 }
 
+$implementationText = Get-Content -LiteralPath (Join-Path $root "IMPLEMENTATION_STATE.yaml") -Raw
+$builderStatus = [regex]::Match($implementationText, '(?m)^builder_status:\s*([A-Z_]+)\s*$').Groups[1].Value
+if (-not $builderStatus) { throw "Cannot resolve the active phase builder status" }
+if ($builderStatus -eq "NOT_STARTED") {
+    # An authorized phase with no implementation has no gate tests yet. Every gate stays NOT_RUN (no
+    # RG_GATE_* outcome is exported), so the evidence report cannot show a pass; nothing is executed.
+    $summary = [ordered]@{
+        schema_version = 1
+        phase = $phase
+        generated_utc = [DateTime]::UtcNow.ToString("o")
+        builder_status = $builderStatus
+        gates = @()
+    }
+    $summaryPath = Join-Path $EvidenceDirectory "phase-gates.json"
+    [System.IO.File]::WriteAllText($summaryPath, ($summary | ConvertTo-Json -Depth 8) + "`n", [System.Text.UTF8Encoding]::new($false))
+    Write-Host "PHASE_GATE_SUMMARY=$summaryPath"
+    Write-Host "PHASE_GATE_TESTS=NOT_RUN (builder_status NOT_STARTED for $phase)"
+    exit 0
+}
+
 $results = [System.Collections.Generic.List[object]]::new()
 foreach ($gateId in $gateIds) {
     if ($gateId -in $externallyEvidenced) { continue }

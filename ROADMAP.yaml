@@ -1,6 +1,6 @@
 schema_version: 1
 project: MAX Research Ground
-current_phase: RG-R02
+current_phase: RG-R03
 phases:
   - id: RG-R00
     name: Rust foundation, Tauri shell, governance, CI
@@ -15,11 +15,12 @@ phases:
   - id: RG-R02
     name: Feature Studio
     objective: Add a versioned indicator registry and anti-lookahead feature engine.
-    lifecycle: ACTIVE
+    lifecycle: ACCEPTED
+    acceptance_evidence: "Owner acceptance WITH_UI_REVIEW_WAIVED: https://github.com/maxqstudio/max-tev-ground/issues/4; manual desktop click-through NOT_RUN, UI review waived, not tested; source SHA 59e0f2e7bd5a875b661bb608d289b3b21b595bd2 (PR #6 merge); source tree SHA 326b01e72b915746be2134d00a2d0d1fa737d853, identical to accepted candidate 235bfe045abb9f3740611c3bf87114eb55973722; exact-main CI SUCCESS https://github.com/maxqstudio/max-tev-ground/actions/runs/39405958946; acceptance artifact research-ground-evidence-39405958946-1 digest sha256:f42c1ba9a1c97e9cb0c32213a365b851abdc6cd191131a1782177d01cff5006e; candidate push CI https://github.com/maxqstudio/max-tev-ground/actions/runs/39402302070 and PR CI https://github.com/maxqstudio/max-tev-ground/actions/runs/39402310436 SUCCESS with 12 of 12 automated gates; Owner-declared visual UX redesign is deferred, not accepted; RG-R01 cancelPreview cancel-to-refresh UX debt is carried forward."
   - id: RG-R03
     name: Deterministic Strategy Engine
     objective: Add deterministic native Rust strategies and isolated strategy contracts.
-    lifecycle: PLANNED
+    lifecycle: ACTIVE
   - id: RG-R04
     name: Ollama and ONNX Model Registry
     objective: Add model discovery, immutable identity, runtime adapters, and model comparison.

@@ -35,7 +35,7 @@ function Find-AcceptedExecutable {
         [Parameter(Mandatory = $true)][string]$Tree
     )
     # Phases whose exact-commit acceptance evidence may supply the desktop binary.
-    $acceptedPhases = @("RG-R00", "RG-R01")
+    $acceptedPhases = @("RG-R00", "RG-R01", "RG-R02")
     if (-not (Test-Path -LiteralPath $AcceptanceRoot -PathType Container)) { return $null }
 
     foreach ($directory in (Get-ChildItem -LiteralPath $AcceptanceRoot -Directory | Sort-Object LastWriteTimeUtc -Descending)) {
@@ -44,7 +44,7 @@ function Find-AcceptedExecutable {
         try { $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json }
         catch { continue }
 
-        # RG-R00 reports name every gate. RG-R01 reports identify gates by id and record the Tauri build in local_execution.checks.
+        # RG-R00 reports name every gate. RG-R01 and later reports identify gates by id and record the Tauri build in local_execution.checks.
         $tauriBuilds = @(@($report.gates) + @($report.local_execution.checks) |
             Where-Object { $_.name -eq "Tauri desktop build without packaging" -and $_.status -eq "PASS" })
         if ($acceptedPhases -notcontains $report.phase -or

@@ -1,6 +1,6 @@
 # MAX Research Ground
 
-Rust-first, local-first foundation for reproducible trading research. **RG-R01 Data Ground is Owner accepted with manual desktop UI and CSV import review waived, not tested. RG-R02 Feature Studio is implemented on `work/rg-r02-feature-studio` and awaits Control Room audit; Owner UI review and acceptance are pending.** RG-R03–RG-R08 remain planned. This repository does not establish that a trading edge exists and does not execute trades.
+Rust-first, local-first foundation for reproducible trading research. **RG-R01 Data Ground and RG-R02 Feature Studio are Owner accepted with manual UI review waived, not tested. RG-R03 Deterministic Strategy Engine is the active scope, but its implementation has not started.** RG-R04–RG-R08 remain planned. This repository does not establish that a trading edge exists and does not execute trades.
 
 ## Build and acceptance
 
@@ -11,7 +11,7 @@ Requirements: Node.js 24.19.0, npm 11.17.0, Rust 1.99.1, Windows C++ Build Tools
 .\RUN_ACCEPTANCE.ps1
 ```
 
-`RUN_ACCEPTANCE.ps1` is the RG-R02 acceptance runner and requires a clean commit on `work/rg-r02-feature-studio`. Besides the workspace, frontend, and Tauri checks, it runs `scripts/Invoke-PhaseGateTests.ps1`, which executes the tests named after each `PHASE_MANIFEST.yaml` gate and fails any gate with zero matching tests. GitHub CI runs the same gate step, so a gate passes only on its own tests, never on a generic suite result.
+`RUN_ACCEPTANCE.ps1` is the RG-R03 acceptance runner. It requires a clean commit on `work/rg-r03-strategy-engine` or on the governance-only branch `work/rg-r02-closure-rg-r03-activation`. Besides the workspace, frontend, and Tauri checks, it runs `scripts/Invoke-PhaseGateTests.ps1`, which executes the tests named after each `PHASE_MANIFEST.yaml` gate and fails any gate with zero matching tests. GitHub CI runs the same gate step, so a gate passes only on its own tests, never on a generic suite result. While `IMPLEMENTATION_STATE.yaml` records `builder_status: NOT_STARTED`, the step runs no gate tests and every RG-R03 gate is reported `NOT_RUN`, so the automated status stays `NOT_RUN`.
 
 ## Open the desktop app
 
@@ -29,14 +29,20 @@ The Data Ground page imports user-selected local CSV or Parquet OHLCV files. It 
 
 Owner acceptance of RG-R01 is bound to source `7f50b398ca272c4c84b5e5c01866945e9eda2a2a`, tree `46c8969bc31faa7f3efaa6474d5ced2322270623`, and exact-main CI [run #39285471335](https://github.com/maxqstudio/max-tev-ground/actions/runs/39285471335). Manual desktop UI and CSV import review were **waived, not tested**. The known `cancelPreview` cancel-to-refresh messaging debt remains unresolved.
 
-## RG-R02 Feature Studio (implemented, pending audit)
+## RG-R02 Feature Studio (accepted)
 
 The `rg-feature-studio` crate computes versioned technical features only from `READY` Data Ground datasets. Before computing, it re-verifies each input through the dataset store, then recomputes the RG-R01 canonical row fingerprint from the exact Parquet rows it reads; after computing, it re-hashes the source. Nine native indicators (SMA, EMA, Wilder RSI, Wilder ATR, population standard deviation, Bollinger bands, ROC, log return, Donchian channel) have typed, bounded parameters, a declared warmup, and hand-calculated plus independently implemented golden-vector tests. No indicator reads volume, because RG-R01 manifests do not declare whether volume is tick or exchange volume.
 
 Each feature row is decided at its target bar's `available_at_utc` (the canonical close). Warmup rows are null with status `WARMUP`. Reference series join as of `available_at_utc + declared lag <= decision`, so an unfinished higher-timeframe bar is never visible; references older than their declared maximum staleness are null with status `STALE`. Nothing is resampled, forward-filled, or synthesized. Computation streams bounded batches on one background worker with progress and cancellation. Output is a canonical Parquet file whose identity (`fs_<sha256>`) binds the input dataset identities, engine version, normalized parameters, and temporal semantics. Previews are staged and registered only after explicit confirmation, through a crash-recoverable promotion journal. Every catalogue read rechecks the manifest and output digest and re-verifies the current bytes of every source dataset; a feature set whose source is missing, modified, or no longer `READY` is reported `QUARANTINED` and cannot be used downstream. The input-row quota bounds the total bars of all datasets one request reads.
 
-The Feature Studio page selects verified inputs, configures registry indicators and reference joins, shows the timing contract, previews real computed values with lineage and hashes, and confirms or cancels. Only headless component and IPC tests have run; **the desktop UI has not been manually tested.** RG-R03–RG-R08 pages remain planned.
+The Feature Studio page selects verified inputs, configures registry indicators and reference joins, shows the timing contract, previews real computed values with lineage and hashes, and confirms or cancels.
 
-Synthetic repository fixtures are parser and deterministic test inputs only; they are not market evidence or proof of trading performance. Historical data remains on the user's machine; the importer does not upload market data. An importer for the legacy research store is deferred. The MT5 bridge is not implemented; neither RG-R01 nor RG-R02 opens a terminal, reads MT5 `Common\Files`, or accesses account/order APIs. Feature sets are research inputs, not trading signals or evidence of edge. No live trading or automatic Champion promotion is part of this phase.
+Owner acceptance of RG-R02 is bound to `main` merge `59e0f2e7bd5a875b661bb608d289b3b21b595bd2`, tree `326b01e72b915746be2134d00a2d0d1fa737d853` (identical to accepted candidate `235bfe045abb9f3740611c3bf87114eb55973722`), and exact-main CI [run #39405958946](https://github.com/maxqstudio/max-tev-ground/actions/runs/39405958946). The native desktop build, launch, restart, and the IPC workflow were evidenced, but manual desktop click-through was **NOT_RUN; UI review waived, not tested**. The Owner's visual redesign request is deferred UX debt, not accepted.
+
+## RG-R03 Deterministic Strategy Engine (active, not started)
+
+RG-R03 is authorized ([Issue #7](https://github.com/maxqstudio/max-tev-ground/issues/7)), but no strategy code exists yet. Its acceptance gates are frozen in `PHASE_MANIFEST.yaml` before implementation, and all of them remain `NOT_RUN`. The Strategy Studio page states that implementation has not started. RG-R03 will emit `BUY`, `SELL`, or `SKIP` research decisions from verified RG-R02 feature sets; it will not place orders, connect to MT5, compute PnL, or claim an edge.
+
+Synthetic repository fixtures are parser and deterministic test inputs only; they are not market evidence or proof of trading performance. Historical data remains on the user's machine; the importer does not upload market data. An importer for the legacy research store is deferred. The MT5 bridge is not implemented; neither RG-R01 nor RG-R02 opens a terminal, reads MT5 `Common\Files`, or accesses account/order APIs. Feature sets are research inputs, not trading signals or evidence of edge. No live trading or automatic Champion promotion is part of any phase so far.
 
 See [CONTRACTS.md](CONTRACTS.md), [SECURITY.md](SECURITY.md), [ACCEPTANCE.md](ACCEPTANCE.md), and generated [ROADMAP.md](ROADMAP.md).

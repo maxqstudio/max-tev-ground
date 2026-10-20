@@ -65,12 +65,12 @@ try {
     if (($passing.gates | Where-Object id -eq "owner_ui_acceptance").status -ne $expectedUiReportStatus) { throw "Owner UI gate status did not match the implementation state" }
     $reproducibleGate = $passing.gates | Where-Object id -eq "reproducible_acceptance"
     if ($reproducibleGate.status -ne "PASS") { throw "Exact source/governance gate did not pass" }
-    if ($manifestPhase -eq "RG-R02") {
-        # Generic suite success must never be inherited as gate evidence: without per-gate results
-        # every feature gate stays NOT_RUN.
+    if ($manifestPhase -notin @("RG-R00", "RG-R01")) {
+        # From RG-R02 on, generic suite success must never be inherited as gate evidence: without
+        # per-gate results every phase gate stays NOT_RUN.
         $inheritedGates = @($passing.gates | Where-Object { $_.id -notin @("owner_ui_acceptance", "reproducible_acceptance") -and $_.status -ne "NOT_RUN" })
-        if ($inheritedGates.Count -gt 0) { throw "RG-R02 gates inherited generic suite results without gate-traceable tests" }
-        if ($passing.automated_status -ne "NOT_RUN") { throw "RG-R02 acceptance without gate-traceable tests was not kept NOT_RUN" }
+        if ($inheritedGates.Count -gt 0) { throw "$manifestPhase gates inherited generic suite results without gate-traceable tests" }
+        if ($passing.automated_status -ne "NOT_RUN") { throw "$manifestPhase acceptance without gate-traceable tests was not kept NOT_RUN" }
 
         foreach ($id in $gateIds) { if ($id -ne "owner_ui_acceptance") { [Environment]::SetEnvironmentVariable("RG_GATE_$id", "success") } }
         $gatedDirectory = Join-Path $fixtureRoot "gate-traceable"
