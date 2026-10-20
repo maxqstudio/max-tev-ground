@@ -2238,7 +2238,9 @@ name = "max-research-ground-desktop"
 version = "0.1.0"
 dependencies = [
  "rg-data-ground",
+ "rg-feature-studio",
  "rg-governance",
+ "rg-persistence",
  "serde",
  "serde_json",
  "tauri",
@@ -3173,6 +3175,25 @@ dependencies = [
  "csv",
  "parquet",
  "proptest",
+ "rg-persistence",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "rg-feature-studio"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "chrono",
+ "parquet",
+ "proptest",
+ "rg-data-ground",
  "rg-persistence",
  "rusqlite",
  "serde",

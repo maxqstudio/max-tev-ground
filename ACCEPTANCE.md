@@ -12,10 +12,16 @@ The known `cancelPreview` path can report a misleading generic error when cancel
 
 ## RG-R02 status
 
-RG-R02 Feature Studio is the active authorized phase after closure. Its implementation has not started in this transition. The mandatory feature gates are registered in `PHASE_MANIFEST.yaml`, and their automated acceptance status remains `NOT_RUN`. The Feature Studio page reports the handoff state and does not present a working feature engine.
+RG-R02 Feature Studio is implemented on `work/rg-r02-feature-studio` and is `READY_FOR_CONTROL_ROOM_AUDIT`. It is not Owner accepted. The machine-readable state records `builder_status: IMPLEMENTED` and `automated_status: AUTOMATED_PASS` for the candidate, with `owner_ui_status: PENDING`, `owner_acceptance: PENDING`, and `next_phase_unlocked: false`. The acceptance gate IDs in `PHASE_MANIFEST.yaml` are unchanged from the activation commit.
 
-## RG-R01 acceptance runner
+Each automated gate is evidenced by tests named after its gate ID (Rust `gate_<id>_*`; frontend `gate feature_studio_ui ...`). `scripts/Invoke-PhaseGateTests.ps1` runs each gate's tests separately, fails a gate that has no matching tests, writes per-gate logs, and writes `phase-gates.json` with test counts. `New-CiEvidence.ps1` embeds those counts and their checksum in `acceptance.json`. A generic suite pass is never inherited as gate evidence: `Test-CiEvidence.ps1` proves that without per-gate results every feature gate reports `NOT_RUN`.
 
-`RUN_ACCEPTANCE.ps1` is scoped to the historical `work/rg-r01-data-ground` candidate branch and runs non-interactively from the authorized Windows root. It checks pinned Rust/Node toolchains, Windows prerequisites, roadmap synchronization, Rust formatting/tests/lint/build, frontend lint/typecheck/tests/build, and Tauri build when MSVC is available. It writes per-command logs and a checksummed report bound to its exact candidate SHA/tree. It never launches the desktop or reads, copies, or modifies the legacy research baseline.
+All feature inputs in tests are labeled synthetic fixtures (`synthetic-fixture:` source IDs) imported through the real Data Ground importer. They are not market data or evidence of edge. No real historical dataset was available to CI, so the real-data baseline remains `NOT_VERIFIED_BY_GITHUB_CI`. The Feature Studio desktop UI was exercised only by headless component and Tauri IPC tests; manual Owner UI review is **pending, not tested**.
 
-GitHub CI now names uploaded source-bound evidence generically so future phase artifacts are not mislabeled as RG-R01. Passing CI code/build checks do not claim RG-R02 acceptance gates passed. RG-R03–RG-R08 remain planned.
+The RG-R01 `cancelPreview` cancel-to-refresh UX debt is unchanged in Data Ground and remains declared debt. Feature Studio's own cancel and confirm paths report the job outcome separately from any later catalogue refresh.
+
+## Acceptance runner
+
+`RUN_ACCEPTANCE.ps1` is scoped to the `work/rg-r02-feature-studio` candidate branch and runs non-interactively from the authorized Windows root. It checks pinned Rust/Node toolchains, Windows prerequisites, roadmap synchronization, CI evidence contracts, Rust formatting/tests/lint/build, frontend lint/typecheck/tests/build, the phase gate-traceable tests, and the Tauri build when MSVC is available. It writes per-command logs and a checksummed report bound to the exact candidate SHA/tree. It never launches the desktop or reads, copies, or modifies the legacy research baseline.
+
+GitHub CI runs the same gate-traceable step and uploads source-bound evidence, including the per-gate logs. RG-R03–RG-R08 remain planned.

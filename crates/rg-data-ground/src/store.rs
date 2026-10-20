@@ -363,6 +363,16 @@ impl DatasetStore {
             .transpose()
     }
 
+    /// Path of a registered snapshot's canonical bars file. Callers must verify the dataset with
+    /// [`DatasetStore::inspect_dataset`] and re-check the file digest around every read.
+    pub fn canonical_bars_path(&self, dataset_id: &str) -> Result<PathBuf, DatasetStoreError> {
+        validate_dataset_id(dataset_id)?;
+        Ok(self
+            .datasets_directory
+            .join(dataset_id)
+            .join("bars.parquet"))
+    }
+
     pub fn list_attempts(&self) -> Result<Vec<ImportAttemptSummary>, DatasetStoreError> {
         let connection = self.connection_guard()?;
         Ok(list_import_attempts(&connection)?

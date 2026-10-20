@@ -10,7 +10,7 @@ Set-Location -LiteralPath $Root
 
 $StartedUtc = [DateTime]::UtcNow
 $RunId = $StartedUtc.ToString("yyyyMMddTHHmmssZ")
-$EvidenceDir = Join-Path $Root "artifacts\acceptance\rg-r01-$RunId"
+$EvidenceDir = Join-Path $Root "artifacts\acceptance\rg-r02-$RunId"
 New-Item -ItemType Directory -Path $EvidenceDir -Force | Out-Null
 $script:GateResults = [System.Collections.Generic.List[object]]::new()
 $script:StepOutcomes = [ordered]@{}
@@ -88,7 +88,7 @@ if ($LASTEXITCODE -ne 0 -or $tree -notmatch '^[0-9a-f]{40,64}$') {
     throw "Cannot resolve exact Git tree SHA"
 }
 $branch = (git rev-parse --abbrev-ref HEAD).Trim()
-$expectedBranch = "work/rg-r01-data-ground"
+$expectedBranch = "work/rg-r02-feature-studio"
 if ($branch -ne $expectedBranch) {
     Add-Result "authorized_branch" "FAIL" "expected=$expectedBranch actual=$branch"
     throw "Acceptance must run on $expectedBranch; found $branch"
@@ -184,6 +184,13 @@ if ($webviewVersion) {
     Add-Result "webview2_runtime" "ENVIRONMENT_BLOCKED" "WebView2 Runtime was not found at $webviewRoot; the app was not launched"
 }
 
+$phaseText = Get-Content -LiteralPath (Join-Path $Root "PHASE_MANIFEST.yaml") -Raw
+$gateSection = [regex]::Match($phaseText, '(?ms)^acceptance_gates:[ \t]*\r?\n(.*?)(?=^\S|\z)')
+if (-not $gateSection.Success) { throw "Cannot resolve active phase acceptance gates for local evidence" }
+$gateIds = @([regex]::Matches($gateSection.Groups[1].Value, '(?m)^\s+- id:\s*([a-z0-9_]+)\s*$') | ForEach-Object { $_.Groups[1].Value })
+# Gate outcomes come only from this run's gate-traceable tests, never from the calling session.
+foreach ($gateId in $gateIds) { [Environment]::SetEnvironmentVariable("RG_GATE_$gateId", $null) }
+
 Invoke-LoggedGate "Rust formatting" { cargo fmt --all -- --check }
 Invoke-LoggedGate "Roadmap governance" { cargo run --locked -p rg-governance --bin rg-governance -- --check }
 Invoke-LoggedGate "CI evidence contract tests" {
@@ -203,6 +210,9 @@ Invoke-LoggedGate "Frontend lint" { npm run lint }
 Invoke-LoggedGate "Frontend typecheck" { npm run typecheck }
 Invoke-LoggedGate "Frontend unit tests" { npm test -- --run }
 Invoke-LoggedGate "Frontend production build" { npm run build }
+Invoke-LoggedGate "Phase gate-traceable tests" {
+    & (Join-Path $Root "scripts\Invoke-PhaseGateTests.ps1") -EvidenceDirectory $EvidenceDir
+}
 
 if ($msvcReady) {
     Invoke-LoggedGate "Tauri desktop build without packaging" {
@@ -236,11 +246,6 @@ $env:GITHUB_RUN_ID = "local-$RunId"
 $env:GITHUB_RUN_ATTEMPT = "1"
 $env:GITHUB_EVENT_NAME = "local-acceptance"
 $env:GITHUB_WORKFLOW = "MAX Research Ground Local Acceptance"
-$phaseText = Get-Content -LiteralPath (Join-Path $Root "PHASE_MANIFEST.yaml") -Raw
-$gateSection = [regex]::Match($phaseText, '(?ms)^acceptance_gates:[ \t]*\r?\n(.*?)(?=^\S|\z)')
-if (-not $gateSection.Success) { throw "Cannot resolve active phase acceptance gates for local evidence" }
-$gateIds = @([regex]::Matches($gateSection.Groups[1].Value, '(?m)^\s+- id:\s*([a-z0-9_]+)\s*$') | ForEach-Object { $_.Groups[1].Value })
-foreach ($gateId in $gateIds) { [Environment]::SetEnvironmentVariable("RG_GATE_$gateId", $null) }
 $env:RG_STEP_reproducible_acceptance = if ($script:StepOutcomes["roadmap_governance"] -eq "success" -and $script:StepOutcomes["source_check"] -eq "success") { "success" } else { "failure" }
 $script:StepOutcomes["reproducible_acceptance"] = $env:RG_STEP_reproducible_acceptance
 $global:LASTEXITCODE = $null

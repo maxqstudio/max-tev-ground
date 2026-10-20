@@ -166,6 +166,11 @@ jobs:
         shell: pwsh
         run: npm run build
 
+      - name: Phase gate-traceable tests
+        id: phase_gate_tests
+        shell: pwsh
+        run: ./scripts/Invoke-PhaseGateTests.ps1 -EvidenceDirectory (Join-Path $env:RUNNER_TEMP 'research-ground-evidence')
+
       - name: Tauri Windows desktop build
         id: tauri_build
         shell: pwsh
@@ -209,7 +214,7 @@ jobs:
   attest-evidence:
     name: Attest acceptance evidence
     needs: windows-foundation
-    if: always() && needs.windows-foundation.outputs.evidence_artifact_id != '' && github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.ref == 'refs/heads/work/rg-r01-data-ground')
+    if: always() && needs.windows-foundation.outputs.evidence_artifact_id != '' && github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.ref == 'refs/heads/work/rg-r02-feature-studio')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

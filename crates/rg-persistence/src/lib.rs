@@ -2,10 +2,10 @@ use std::path::Path;
 
 use rg_contracts::ExperimentManifest;
 use rusqlite::{Connection, TransactionBehavior};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Error)]
 pub enum PersistenceError {
@@ -29,6 +29,10 @@ pub enum PersistenceError {
     InvalidDatasetMetadata(String),
     #[error("stored manifest SHA-256 does not match manifest bytes for experiment: {0}")]
     ManifestChecksumMismatch(String),
+    #[error("feature set ID or identity already exists: {0}")]
+    FeatureSetAlreadyExists(String),
+    #[error("feature set metadata is invalid: {0}")]
+    InvalidFeatureSetMetadata(String),
 }
 
 #[derive(Clone, Copy)]
@@ -180,6 +184,82 @@ const MIGRATIONS: &[Migration] = &[
             diagnostic_message TEXT
         );
         CREATE INDEX dataset_promotions_staging_idx ON dataset_promotions(staging_name);
+    ",
+    },
+    Migration {
+        version: 6,
+        name: "immutable_feature_set_registry",
+        sql: "
+        CREATE TABLE feature_sets (
+            feature_set_id TEXT PRIMARY KEY NOT NULL,
+            identity_sha256 TEXT NOT NULL UNIQUE CHECK (length(identity_sha256) = 64),
+            manifest_json TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+            output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+            created_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('READY', 'BLOCKED'))
+        );
+        CREATE TRIGGER feature_sets_prevent_update
+        BEFORE UPDATE ON feature_sets
+        BEGIN
+            SELECT RAISE(ABORT, 'feature set metadata is immutable');
+        END;
+        CREATE TRIGGER feature_sets_prevent_delete
+        BEFORE DELETE ON feature_sets
+        BEGIN
+            SELECT RAISE(ABORT, 'feature set metadata is immutable');
+        END;
+        CREATE TABLE feature_set_inputs (
+            feature_set_id TEXT NOT NULL REFERENCES feature_sets(feature_set_id),
+            dataset_id TEXT NOT NULL REFERENCES datasets(dataset_id),
+            dataset_fingerprint TEXT NOT NULL CHECK (length(dataset_fingerprint) = 64),
+            PRIMARY KEY (feature_set_id, dataset_id)
+        );
+        CREATE TRIGGER feature_set_inputs_prevent_update
+        BEFORE UPDATE ON feature_set_inputs
+        BEGIN
+            SELECT RAISE(ABORT, 'feature set lineage is immutable');
+        END;
+        CREATE TRIGGER feature_set_inputs_prevent_delete
+        BEFORE DELETE ON feature_set_inputs
+        BEGIN
+            SELECT RAISE(ABORT, 'feature set lineage is immutable');
+        END;
+        CREATE TABLE feature_set_promotions (
+            feature_set_id TEXT PRIMARY KEY NOT NULL,
+            staging_name TEXT NOT NULL,
+            identity_sha256 TEXT NOT NULL CHECK (length(identity_sha256) = 64),
+            manifest_json TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+            output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+            created_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('READY', 'BLOCKED')),
+            inputs_json TEXT NOT NULL,
+            attempt_id TEXT NOT NULL UNIQUE,
+            attempt_started_at_utc TEXT NOT NULL,
+            attempt_completed_at_utc TEXT NOT NULL
+        );
+        CREATE TABLE feature_attempts (
+            attempt_id TEXT PRIMARY KEY NOT NULL,
+            started_at_utc TEXT NOT NULL,
+            completed_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('MATERIALIZED', 'REUSED', 'FAILED', 'CANCELLED')),
+            feature_set_id TEXT,
+            diagnostic_code TEXT,
+            diagnostic_message TEXT
+        );
+        CREATE INDEX feature_attempts_completed_idx
+            ON feature_attempts(completed_at_utc DESC, attempt_id);
+        CREATE TRIGGER feature_attempts_prevent_update
+        BEFORE UPDATE ON feature_attempts
+        BEGIN
+            SELECT RAISE(ABORT, 'feature attempt records are immutable');
+        END;
+        CREATE TRIGGER feature_attempts_prevent_delete
+        BEFORE DELETE ON feature_attempts
+        BEGIN
+            SELECT RAISE(ABORT, 'feature attempt records are immutable');
+        END;
     ",
     },
 ];
@@ -812,6 +892,405 @@ fn validate_dataset_metadata(dataset: &DatasetMetadata) -> Result<(), Persistenc
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeatureSetMetadata {
+    pub feature_set_id: String,
+    pub identity_sha256: String,
+    pub manifest_json: String,
+    pub manifest_sha256: String,
+    pub output_sha256: String,
+    pub created_at_utc: String,
+    pub status: String,
+    pub manifest_integrity_valid: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeatureSetInput {
+    pub dataset_id: String,
+    pub dataset_fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FeatureAttemptRecord {
+    pub attempt_id: String,
+    pub started_at_utc: String,
+    pub completed_at_utc: String,
+    pub status: String,
+    pub feature_set_id: Option<String>,
+    pub diagnostic_code: Option<String>,
+    pub diagnostic_message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingFeatureSetPromotion {
+    pub staging_name: String,
+    pub feature_set: FeatureSetMetadata,
+    pub inputs: Vec<FeatureSetInput>,
+    pub attempt: FeatureAttemptRecord,
+}
+
+fn validate_feature_set_metadata(feature_set: &FeatureSetMetadata) -> Result<(), PersistenceError> {
+    let valid_sha =
+        |value: &str| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !valid_sha(&feature_set.identity_sha256)
+        || feature_set.feature_set_id != format!("fs_{}", feature_set.identity_sha256)
+        || !valid_sha(&feature_set.manifest_sha256)
+        || !valid_sha(&feature_set.output_sha256)
+        || feature_set.created_at_utc.trim().is_empty()
+        || !matches!(feature_set.status.as_str(), "READY" | "BLOCKED")
+    {
+        return Err(PersistenceError::InvalidFeatureSetMetadata(
+            "identifier, digest, timestamp, or status is invalid".into(),
+        ));
+    }
+    let actual = rg_contracts::Sha256Digest::of_bytes(feature_set.manifest_json.as_bytes());
+    if feature_set.manifest_sha256 != actual.as_str() {
+        return Err(PersistenceError::InvalidFeatureSetMetadata(
+            "manifest SHA-256 does not match manifest bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_feature_inputs(inputs: &[FeatureSetInput]) -> Result<(), PersistenceError> {
+    let valid_sha =
+        |value: &str| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let mut seen = std::collections::BTreeSet::new();
+    if inputs.is_empty()
+        || inputs.iter().any(|input| {
+            !valid_sha(&input.dataset_fingerprint)
+                || input.dataset_id != format!("ds_{}", input.dataset_fingerprint)
+                || !seen.insert(input.dataset_id.as_str())
+        })
+    {
+        return Err(PersistenceError::InvalidFeatureSetMetadata(
+            "feature set lineage must name distinct registered dataset identities".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_feature_attempt(
+    attempt: &FeatureAttemptRecord,
+    allowed: &[&str],
+) -> Result<(), PersistenceError> {
+    if attempt.attempt_id.trim().is_empty()
+        || attempt.started_at_utc.trim().is_empty()
+        || attempt.completed_at_utc.trim().is_empty()
+        || !allowed.contains(&attempt.status.as_str())
+    {
+        return Err(PersistenceError::InvalidFeatureSetMetadata(
+            "feature attempt metadata is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_staging_name(value: &str) -> Result<(), PersistenceError> {
+    if value.trim().is_empty() || value.contains(['/', '\\']) || value == "." || value == ".." {
+        return Err(PersistenceError::InvalidFeatureSetMetadata(
+            "promotion staging identity is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn save_pending_feature_set_promotion(
+    connection: &Connection,
+    pending: &PendingFeatureSetPromotion,
+) -> Result<(), PersistenceError> {
+    validate_feature_set_metadata(&pending.feature_set)?;
+    validate_feature_inputs(&pending.inputs)?;
+    validate_feature_attempt(&pending.attempt, &["MATERIALIZED"])?;
+    validate_staging_name(&pending.staging_name)?;
+    let inputs_json = serde_json::to_string(&pending.inputs)?;
+    connection.execute(
+        "INSERT INTO feature_set_promotions (
+            feature_set_id, staging_name, identity_sha256, manifest_json, manifest_sha256,
+            output_sha256, created_at_utc, status, inputs_json, attempt_id,
+            attempt_started_at_utc, attempt_completed_at_utc
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            pending.feature_set.feature_set_id,
+            pending.staging_name,
+            pending.feature_set.identity_sha256,
+            pending.feature_set.manifest_json,
+            pending.feature_set.manifest_sha256,
+            pending.feature_set.output_sha256,
+            pending.feature_set.created_at_utc,
+            pending.feature_set.status,
+            inputs_json,
+            pending.attempt.attempt_id,
+            pending.attempt.started_at_utc,
+            pending.attempt.completed_at_utc,
+        ],
+    )?;
+    Ok(())
+}
+
+fn pending_feature_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<(PendingFeatureSetPromotion, String), rusqlite::Error> {
+    let manifest_json: String = row.get(3)?;
+    let manifest_sha256: String = row.get(4)?;
+    let actual = rg_contracts::Sha256Digest::of_bytes(manifest_json.as_bytes());
+    let feature_set_id: String = row.get(0)?;
+    Ok((
+        PendingFeatureSetPromotion {
+            staging_name: row.get(1)?,
+            feature_set: FeatureSetMetadata {
+                feature_set_id: feature_set_id.clone(),
+                identity_sha256: row.get(2)?,
+                manifest_integrity_valid: manifest_sha256 == actual.as_str(),
+                manifest_json,
+                manifest_sha256,
+                output_sha256: row.get(5)?,
+                created_at_utc: row.get(6)?,
+                status: row.get(7)?,
+            },
+            inputs: Vec::new(),
+            attempt: FeatureAttemptRecord {
+                attempt_id: row.get(9)?,
+                started_at_utc: row.get(10)?,
+                completed_at_utc: row.get(11)?,
+                status: "MATERIALIZED".into(),
+                feature_set_id: Some(feature_set_id),
+                diagnostic_code: None,
+                diagnostic_message: None,
+            },
+        },
+        row.get(8)?,
+    ))
+}
+
+const PENDING_FEATURE_COLUMNS: &str =
+    "feature_set_id, staging_name, identity_sha256, manifest_json, manifest_sha256,
+     output_sha256, created_at_utc, status, inputs_json, attempt_id,
+     attempt_started_at_utc, attempt_completed_at_utc";
+
+fn decode_pending_feature(
+    (mut pending, inputs_json): (PendingFeatureSetPromotion, String),
+) -> Result<PendingFeatureSetPromotion, PersistenceError> {
+    pending.inputs = serde_json::from_str(&inputs_json)?;
+    validate_feature_set_metadata(&pending.feature_set)?;
+    validate_feature_inputs(&pending.inputs)?;
+    validate_staging_name(&pending.staging_name)?;
+    Ok(pending)
+}
+
+pub fn list_pending_feature_set_promotions(
+    connection: &Connection,
+) -> Result<Vec<PendingFeatureSetPromotion>, PersistenceError> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {PENDING_FEATURE_COLUMNS} FROM feature_set_promotions ORDER BY feature_set_id"
+    ))?;
+    let rows = statement.query_map([], pending_feature_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(decode_pending_feature)
+        .collect()
+}
+
+pub fn clear_pending_feature_set_promotion(
+    connection: &Connection,
+    feature_set_id: &str,
+) -> Result<bool, PersistenceError> {
+    Ok(connection.execute(
+        "DELETE FROM feature_set_promotions WHERE feature_set_id = ?1",
+        [feature_set_id],
+    )? == 1)
+}
+
+/// Registers the journaled feature set, its dataset lineage, and its terminal attempt in one
+/// transaction, then removes the journal entry. A failure leaves the journal for recovery.
+pub fn complete_pending_feature_set_promotion(
+    connection: &mut Connection,
+    feature_set_id: &str,
+) -> Result<(), PersistenceError> {
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let pending = {
+        let mut statement = tx.prepare(&format!(
+            "SELECT {PENDING_FEATURE_COLUMNS} FROM feature_set_promotions WHERE feature_set_id = ?1"
+        ))?;
+        let mut rows = statement.query([feature_set_id])?;
+        rows.next()?.map(pending_feature_from_row).transpose()?
+    }
+    .ok_or_else(|| {
+        PersistenceError::InvalidFeatureSetMetadata(format!(
+            "pending promotion is missing for feature set {feature_set_id}"
+        ))
+    })
+    .and_then(decode_pending_feature)?;
+    let feature_set = &pending.feature_set;
+    let inserted = tx.execute(
+        "INSERT INTO feature_sets (
+            feature_set_id, identity_sha256, manifest_json, manifest_sha256, output_sha256,
+            created_at_utc, status
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            feature_set.feature_set_id,
+            feature_set.identity_sha256,
+            feature_set.manifest_json,
+            feature_set.manifest_sha256,
+            feature_set.output_sha256,
+            feature_set.created_at_utc,
+            feature_set.status,
+        ],
+    );
+    match inserted {
+        Ok(_) => {}
+        Err(error)
+            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) =>
+        {
+            return Err(PersistenceError::FeatureSetAlreadyExists(
+                feature_set.feature_set_id.clone(),
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    for input in &pending.inputs {
+        tx.execute(
+            "INSERT INTO feature_set_inputs (feature_set_id, dataset_id, dataset_fingerprint)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                feature_set.feature_set_id,
+                input.dataset_id,
+                input.dataset_fingerprint
+            ],
+        )?;
+    }
+    insert_feature_attempt(&tx, &pending.attempt)?;
+    tx.execute(
+        "DELETE FROM feature_set_promotions WHERE feature_set_id = ?1",
+        [feature_set_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn insert_feature_attempt(
+    connection: &Connection,
+    attempt: &FeatureAttemptRecord,
+) -> Result<(), PersistenceError> {
+    connection.execute(
+        "INSERT INTO feature_attempts (
+            attempt_id, started_at_utc, completed_at_utc, status, feature_set_id,
+            diagnostic_code, diagnostic_message
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            attempt.attempt_id,
+            attempt.started_at_utc,
+            attempt.completed_at_utc,
+            attempt.status,
+            attempt.feature_set_id,
+            attempt.diagnostic_code,
+            attempt.diagnostic_message
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn save_feature_attempt(
+    connection: &Connection,
+    attempt: &FeatureAttemptRecord,
+) -> Result<(), PersistenceError> {
+    validate_feature_attempt(attempt, &["REUSED", "FAILED", "CANCELLED"])?;
+    insert_feature_attempt(connection, attempt)
+}
+
+pub fn list_feature_attempts(
+    connection: &Connection,
+    limit: u64,
+) -> Result<Vec<FeatureAttemptRecord>, PersistenceError> {
+    let limit = i64::try_from(limit).map_err(|_| {
+        PersistenceError::InvalidFeatureSetMetadata("attempt page size is too large".into())
+    })?;
+    let mut statement = connection.prepare(
+        "SELECT attempt_id, started_at_utc, completed_at_utc, status, feature_set_id,
+                diagnostic_code, diagnostic_message
+         FROM feature_attempts ORDER BY completed_at_utc DESC, attempt_id LIMIT ?1",
+    )?;
+    let rows = statement.query_map([limit], |row| {
+        Ok(FeatureAttemptRecord {
+            attempt_id: row.get(0)?,
+            started_at_utc: row.get(1)?,
+            completed_at_utc: row.get(2)?,
+            status: row.get(3)?,
+            feature_set_id: row.get(4)?,
+            diagnostic_code: row.get(5)?,
+            diagnostic_message: row.get(6)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn feature_set_from_row(row: &rusqlite::Row<'_>) -> Result<FeatureSetMetadata, rusqlite::Error> {
+    let manifest_json: String = row.get(2)?;
+    let manifest_sha256: String = row.get(3)?;
+    let actual = rg_contracts::Sha256Digest::of_bytes(manifest_json.as_bytes());
+    Ok(FeatureSetMetadata {
+        feature_set_id: row.get(0)?,
+        identity_sha256: row.get(1)?,
+        manifest_integrity_valid: manifest_sha256 == actual.as_str(),
+        manifest_json,
+        manifest_sha256,
+        output_sha256: row.get(4)?,
+        created_at_utc: row.get(5)?,
+        status: row.get(6)?,
+    })
+}
+
+const FEATURE_SET_COLUMNS: &str = "feature_set_id, identity_sha256, manifest_json, manifest_sha256,
+     output_sha256, created_at_utc, status";
+
+pub fn get_feature_set_metadata(
+    connection: &Connection,
+    feature_set_id: &str,
+) -> Result<Option<FeatureSetMetadata>, PersistenceError> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {FEATURE_SET_COLUMNS} FROM feature_sets WHERE feature_set_id = ?1"
+    ))?;
+    let mut rows = statement.query([feature_set_id])?;
+    Ok(rows.next()?.map(feature_set_from_row).transpose()?)
+}
+
+pub fn list_feature_set_metadata_after(
+    connection: &Connection,
+    after_feature_set_id: &str,
+    limit: u64,
+) -> Result<Vec<FeatureSetMetadata>, PersistenceError> {
+    let limit = i64::try_from(limit).map_err(|_| {
+        PersistenceError::InvalidFeatureSetMetadata("feature set page size is too large".into())
+    })?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT {FEATURE_SET_COLUMNS} FROM feature_sets
+         WHERE feature_set_id > ?1 ORDER BY feature_set_id LIMIT ?2"
+    ))?;
+    let rows = statement.query_map(
+        rusqlite::params![after_feature_set_id, limit],
+        feature_set_from_row,
+    )?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn list_feature_set_inputs(
+    connection: &Connection,
+    feature_set_id: &str,
+) -> Result<Vec<FeatureSetInput>, PersistenceError> {
+    let mut statement = connection.prepare(
+        "SELECT dataset_id, dataset_fingerprint FROM feature_set_inputs
+         WHERE feature_set_id = ?1 ORDER BY dataset_id",
+    )?;
+    let rows = statement.query_map([feature_set_id], |row| {
+        Ok(FeatureSetInput {
+            dataset_id: row.get(0)?,
+            dataset_fingerprint: row.get(1)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 fn checksum(value: &str) -> String {
     rg_contracts::Sha256Digest::of_bytes(value.as_bytes())
         .as_str()
@@ -893,7 +1372,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 5);
+        assert_eq!(count, CURRENT_SCHEMA_VERSION);
     }
 
     #[test]
@@ -1030,7 +1509,7 @@ mod tests {
                     row.get(0)
                 })
                 .unwrap();
-            assert_eq!(migrations, 5);
+            assert_eq!(migrations, CURRENT_SCHEMA_VERSION);
         }
     }
     #[test]
@@ -1316,6 +1795,10 @@ mod tests {
         ];
         assert!(migrate_with(&mut connection, &broken, 3).is_err());
         assert_eq!(schema_version(&connection).unwrap(), 2);
+        assert_failed_dataset_migration_left_no_registry(&connection);
+    }
+
+    fn assert_failed_dataset_migration_left_no_registry(connection: &Connection) {
         let datasets: u32 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='datasets'",
@@ -1330,5 +1813,241 @@ mod tests {
             })
             .unwrap();
         assert_eq!(applied, 2);
+    }
+
+    /// Registers a READY fixture dataset whose ID follows the `ds_<fingerprint>` contract so
+    /// feature lineage foreign keys have a real parent row.
+    fn registered_lineage_dataset(connection: &mut Connection, seed: char) -> FeatureSetInput {
+        let fingerprint = seed.to_string().repeat(64);
+        let manifest_json = format!("{{\"fixture\":\"lineage-{seed}\"}}");
+        let dataset = DatasetMetadata {
+            dataset_id: format!("ds_{fingerprint}"),
+            fingerprint: fingerprint.clone(),
+            manifest_sha256: checksum(&manifest_json),
+            manifest_json,
+            parquet_sha256: "b".repeat(64),
+            raw_sha256: "c".repeat(64),
+            created_at_utc: "2026-10-20T00:00:00Z".into(),
+            status: "READY".into(),
+            manifest_integrity_valid: true,
+        };
+        let mut attempt = imported_attempt();
+        attempt.attempt_id = format!("attempt-lineage-{seed}");
+        save_dataset_and_attempt(connection, &dataset, &attempt).unwrap();
+        FeatureSetInput {
+            dataset_id: dataset.dataset_id,
+            dataset_fingerprint: fingerprint,
+        }
+    }
+
+    fn pending_feature_set(inputs: Vec<FeatureSetInput>) -> PendingFeatureSetPromotion {
+        let identity = "f".repeat(64);
+        let manifest_json = "{\"feature_fixture\":true}".to_owned();
+        PendingFeatureSetPromotion {
+            staging_name: "018f4c4f-7d9b-7b9f-a70e-92bb7cf04c62".into(),
+            feature_set: FeatureSetMetadata {
+                feature_set_id: format!("fs_{identity}"),
+                identity_sha256: identity,
+                manifest_sha256: checksum(&manifest_json),
+                manifest_json,
+                output_sha256: "e".repeat(64),
+                created_at_utc: "2026-10-20T00:00:01Z".into(),
+                status: "READY".into(),
+                manifest_integrity_valid: true,
+            },
+            inputs,
+            attempt: FeatureAttemptRecord {
+                attempt_id: "feature-attempt-fixture".into(),
+                started_at_utc: "2026-10-20T00:00:00Z".into(),
+                completed_at_utc: "2026-10-20T00:00:01Z".into(),
+                status: "MATERIALIZED".into(),
+                feature_set_id: None,
+                diagnostic_code: None,
+                diagnostic_message: None,
+            },
+        }
+    }
+
+    #[test]
+    fn gate_feature_materialization_journal_registers_lineage_and_attempt_atomically() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate(&mut connection).unwrap();
+        let input = registered_lineage_dataset(&mut connection, 'a');
+        let pending = pending_feature_set(vec![input.clone()]);
+        save_pending_feature_set_promotion(&connection, &pending).unwrap();
+        assert_eq!(
+            list_pending_feature_set_promotions(&connection)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            get_feature_set_metadata(&connection, &pending.feature_set.feature_set_id)
+                .unwrap()
+                .is_none()
+        );
+
+        complete_pending_feature_set_promotion(
+            &mut connection,
+            &pending.feature_set.feature_set_id,
+        )
+        .unwrap();
+        assert!(list_pending_feature_set_promotions(&connection)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            get_feature_set_metadata(&connection, &pending.feature_set.feature_set_id).unwrap(),
+            Some(pending.feature_set.clone())
+        );
+        assert_eq!(
+            list_feature_set_inputs(&connection, &pending.feature_set.feature_set_id).unwrap(),
+            vec![input]
+        );
+        let attempts = list_feature_attempts(&connection, 10).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status, "MATERIALIZED");
+        assert_eq!(
+            attempts[0].feature_set_id.as_deref(),
+            Some(pending.feature_set.feature_set_id.as_str())
+        );
+    }
+
+    #[test]
+    fn gate_recovery_and_tamper_lineage_to_unregistered_dataset_rolls_back_and_keeps_journal() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate(&mut connection).unwrap();
+        let fingerprint = "9".repeat(64);
+        let pending = pending_feature_set(vec![FeatureSetInput {
+            dataset_id: format!("ds_{fingerprint}"),
+            dataset_fingerprint: fingerprint,
+        }]);
+        save_pending_feature_set_promotion(&connection, &pending).unwrap();
+
+        assert!(complete_pending_feature_set_promotion(
+            &mut connection,
+            &pending.feature_set.feature_set_id
+        )
+        .is_err());
+        assert!(
+            get_feature_set_metadata(&connection, &pending.feature_set.feature_set_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(list_feature_attempts(&connection, 10).unwrap().is_empty());
+        assert_eq!(
+            list_pending_feature_set_promotions(&connection)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn gate_recovery_and_tamper_feature_registry_rows_are_immutable_and_tamper_evident() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate(&mut connection).unwrap();
+        let input = registered_lineage_dataset(&mut connection, 'a');
+        let pending = pending_feature_set(vec![input]);
+        let id = pending.feature_set.feature_set_id.clone();
+        save_pending_feature_set_promotion(&connection, &pending).unwrap();
+        complete_pending_feature_set_promotion(&mut connection, &id).unwrap();
+
+        for statement in [
+            "UPDATE feature_sets SET status = 'BLOCKED'",
+            "DELETE FROM feature_sets",
+            "UPDATE feature_set_inputs SET dataset_fingerprint = dataset_fingerprint",
+            "DELETE FROM feature_set_inputs",
+            "UPDATE feature_attempts SET status = 'FAILED'",
+            "DELETE FROM feature_attempts",
+        ] {
+            assert!(connection.execute(statement, []).is_err(), "{statement}");
+        }
+        connection
+            .execute_batch(
+                "DROP TRIGGER feature_sets_prevent_update;
+                 UPDATE feature_sets SET manifest_json = manifest_json || ' ';",
+            )
+            .unwrap();
+        assert!(
+            !get_feature_set_metadata(&connection, &id)
+                .unwrap()
+                .unwrap()
+                .manifest_integrity_valid
+        );
+    }
+
+    #[test]
+    fn gate_recovery_and_tamper_feature_journal_rejects_inconsistent_identity() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate(&mut connection).unwrap();
+        let input = registered_lineage_dataset(&mut connection, 'a');
+        let mut wrong_id = pending_feature_set(vec![input.clone()]);
+        wrong_id.feature_set.feature_set_id = format!("fs_{}", "0".repeat(64));
+        assert!(save_pending_feature_set_promotion(&connection, &wrong_id).is_err());
+        let mut wrong_manifest = pending_feature_set(vec![input.clone()]);
+        wrong_manifest.feature_set.manifest_json.push(' ');
+        assert!(save_pending_feature_set_promotion(&connection, &wrong_manifest).is_err());
+        let mut duplicate_inputs = pending_feature_set(vec![input.clone(), input]);
+        duplicate_inputs.staging_name = "fixture".into();
+        assert!(save_pending_feature_set_promotion(&connection, &duplicate_inputs).is_err());
+        assert!(list_pending_feature_set_promotions(&connection)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn gate_recovery_and_tamper_failed_feature_migration_rolls_back_to_dataset_schema() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let mut broken = MIGRATIONS[..5].to_vec();
+        broken.push(Migration {
+            version: 6,
+            name: "intentional_feature_failure_fixture",
+            sql: "CREATE TABLE feature_sets(id INTEGER); INSERT INTO missing_table VALUES (1);",
+        });
+        assert!(migrate_with(&mut connection, &broken, 6).is_err());
+        assert_eq!(schema_version(&connection).unwrap(), 5);
+        let feature_tables: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'feature%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(feature_tables, 0);
+
+        assert_eq!(migrate(&mut connection).unwrap(), CURRENT_SCHEMA_VERSION);
+        let feature_tables: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'feature%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(feature_tables, 4);
+    }
+
+    #[test]
+    fn version_five_registry_upgrades_to_feature_schema_without_losing_datasets() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        assert_eq!(
+            migrate_with(&mut connection, &MIGRATIONS[..5], 5).unwrap(),
+            5
+        );
+        let input = registered_lineage_dataset(&mut connection, 'b');
+        assert_eq!(migrate(&mut connection).unwrap(), CURRENT_SCHEMA_VERSION);
+        assert!(get_dataset_metadata(&connection, &input.dataset_id)
+            .unwrap()
+            .is_some());
+        let applied: u32 = connection
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(applied, CURRENT_SCHEMA_VERSION);
     }
 }

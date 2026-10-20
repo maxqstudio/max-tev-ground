@@ -77,6 +77,11 @@ impl DataGroundState {
         })
     }
 
+    /// The shared dataset registry, so Feature Studio reads the same verified snapshots.
+    pub fn store(&self) -> Arc<DatasetStore> {
+        Arc::clone(&self.store)
+    }
+
     fn insert_selected_source(&self, path: PathBuf) -> Result<SelectedSource, String> {
         let file_name = path
             .file_name()

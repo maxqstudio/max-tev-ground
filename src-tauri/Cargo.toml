@@ -14,7 +14,9 @@ tauri-build.workspace = true
 
 [dependencies]
 rg-data-ground = { path = "../crates/rg-data-ground" }
+rg-feature-studio = { path = "../crates/rg-feature-studio" }
 rg-governance = { path = "../crates/rg-governance" }
+rg-persistence = { path = "../crates/rg-persistence" }
 serde.workspace = true
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true

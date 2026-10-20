@@ -66,9 +66,25 @@ try {
     $reproducibleGate = $passing.gates | Where-Object id -eq "reproducible_acceptance"
     if ($reproducibleGate.status -ne "PASS") { throw "Exact source/governance gate did not pass" }
     if ($manifestPhase -eq "RG-R02") {
-        $unimplementedGates = @($passing.gates | Where-Object { $_.id -notin @("owner_ui_acceptance", "reproducible_acceptance") -and $_.status -ne "NOT_RUN" })
-        if ($unimplementedGates.Count -gt 0) { throw "Unimplemented RG-R02 acceptance gates were reported as executed" }
-        if ($passing.automated_status -ne "NOT_RUN") { throw "Unimplemented RG-R02 acceptance was not kept NOT_RUN" }
+        # Generic suite success must never be inherited as gate evidence: without per-gate results
+        # every feature gate stays NOT_RUN.
+        $inheritedGates = @($passing.gates | Where-Object { $_.id -notin @("owner_ui_acceptance", "reproducible_acceptance") -and $_.status -ne "NOT_RUN" })
+        if ($inheritedGates.Count -gt 0) { throw "RG-R02 gates inherited generic suite results without gate-traceable tests" }
+        if ($passing.automated_status -ne "NOT_RUN") { throw "RG-R02 acceptance without gate-traceable tests was not kept NOT_RUN" }
+
+        foreach ($id in $gateIds) { if ($id -ne "owner_ui_acceptance") { [Environment]::SetEnvironmentVariable("RG_GATE_$id", "success") } }
+        $gatedDirectory = Join-Path $fixtureRoot "gate-traceable"
+        New-Item -ItemType Directory -Path $gatedDirectory -Force | Out-Null
+        $summaryGates = @($gateIds | Where-Object { $_ -notin @("owner_ui_acceptance", "reproducible_acceptance") } | ForEach-Object { [ordered]@{ id = $_; outcome = "success"; rust_tests_passed = 1 } })
+        [System.IO.File]::WriteAllText((Join-Path $gatedDirectory "phase-gates.json"), ([ordered]@{ schema_version = 1; phase = $manifestPhase; gates = $summaryGates } | ConvertTo-Json -Depth 6))
+        & $generator -OutputDirectory $gatedDirectory
+        $gated = Get-Content -LiteralPath (Join-Path $gatedDirectory "acceptance.json") -Raw | ConvertFrom-Json
+        $unpassed = @($gated.gates | Where-Object { $_.id -ne "owner_ui_acceptance" -and $_.status -ne "PASS" })
+        if ($unpassed.Count -ne 0) { throw "Passing gate-traceable results were not reported as PASS" }
+        if ($gated.automated_status -ne "AUTOMATED_PASS") { throw "Passing gate-traceable results did not report AUTOMATED_PASS" }
+        if (@($gated.phase_gate_tests.gates).Count -ne $summaryGates.Count) { throw "Per-gate test counts were not embedded in the evidence" }
+        if (($gated.gates | Where-Object id -eq "owner_ui_acceptance").status -ne "OWNER_UI_ACCEPTANCE_PENDING") { throw "Owner UI acceptance was inferred from automated gates" }
+        foreach ($id in $gateIds) { [Environment]::SetEnvironmentVariable("RG_GATE_$id", $null) }
     } else {
         $unpassedAutomatedGates = @($passing.gates | Where-Object { $_.id -ne "owner_ui_acceptance" -and $_.status -ne "PASS" })
         if ($unpassedAutomatedGates.Count -ne 0) { throw "A mapped acceptance gate did not inherit its passing validation evidence" }

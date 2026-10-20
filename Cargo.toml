@@ -2,6 +2,7 @@
 members = [
   "crates/rg-contracts",
   "crates/rg-data-ground",
+  "crates/rg-feature-studio",
   "crates/rg-governance",
   "crates/rg-persistence",
   "src-tauri",
@@ -9,6 +10,7 @@ members = [
 default-members = [
   "crates/rg-contracts",
   "crates/rg-data-ground",
+  "crates/rg-feature-studio",
   "crates/rg-governance",
   "crates/rg-persistence",
   "src-tauri",

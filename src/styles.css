@@ -1707,3 +1707,77 @@ h1 {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Feature Studio: registry configuration, causal timing contract, and feature-set lineage. */
+.feature-notice {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -6px 0 16px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.feature-card {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+
+.feature-card > .button {
+  justify-self: start;
+}
+
+.feature-card .form-hint code,
+.feature-notice code {
+  overflow-wrap: anywhere;
+}
+
+.temporal-rules {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.temporal-rules li {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--green-pale);
+}
+
+.temporal-rules strong {
+  color: var(--green-strong);
+  font-weight: 600;
+}
+
+.feature-values caption,
+.feature-studio-page .series-table caption {
+  padding: 0 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: left;
+}
+
+.row-status {
+  color: var(--amber);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+@media (max-width: 760px) {
+  .temporal-rules li {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
