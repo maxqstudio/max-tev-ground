@@ -53,6 +53,14 @@ const deliverableLabels: Record<string, string> = {
   causal_context_joins: "Causal context joins",
   immutable_decision_sets: "Immutable decision sets",
   strategy_studio_ui: "Strategy Studio UI",
+  local_runtime_boundary: "Local runtime boundary",
+  model_discovery: "Model discovery",
+  model_identity_registry: "Model identity registry",
+  runtime_adapters: "Runtime adapters",
+  verified_model_input: "Verified model input",
+  immutable_inference_records: "Immutable inference records",
+  model_comparison: "Model comparison",
+  model_lab_ui: "Model Lab UI",
 };
 
 function statusLabel(value: string): string {
@@ -222,7 +230,7 @@ function Overview({
                 <div>{accepted.phase}: Owner accepted. {accepted.phase === "RG-R01" ? "Desktop UI and CSV import review were waived, NOT TESTED." : "UI review " + (accepted.owner_ui_status === "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED" ? "waived, not tested" : statusLabel(accepted.owner_ui_status).toLowerCase()) + "."}</div>
                 <div>Source <code>{accepted.source_sha}</code>{accepted.source_tree_sha ? <> · tree <code>{accepted.source_tree_sha}</code></> : null}</div>
                 {accepted.known_debts?.map((debt) => (
-                  <div key={debt}>Known UX debt (unresolved): {debt}</div>
+                  <div key={debt}>Known debt (unresolved): {debt}</div>
                 ))}
               </div>
             ))}

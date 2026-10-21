@@ -1,49 +1,54 @@
 schema_version: 3
-phase: RG-R03
+phase: RG-R04
 lifecycle: ACTIVE
 deliverables:
-  - verified_feature_input
-  - strategy_registry
-  - decision_engine
-  - causal_context_joins
-  - immutable_decision_sets
+  - local_runtime_boundary
+  - model_discovery
+  - model_identity_registry
+  - runtime_adapters
+  - verified_model_input
+  - immutable_inference_records
+  - model_comparison
   - resource_controls
-  - strategy_studio_ui
+  - model_lab_ui
   - acceptance_evidence
 acceptance_gates:
-  - id: strategy_input_authority
-    requirement: Strategy evaluation consumes only registered READY RG-R02 feature sets whose manifest, output digest, and source lineage re-verify at consumption and around every read.
-    evidence: Tests reject blocked, quarantined, missing, tampered, stale, and changed-identity feature sets, and prove no feature is recomputed and no market bar is synthesized.
-  - id: typed_strategy_registry
-    requirement: Native Rust strategy definitions declare stable identity, semantic version, typed bounded parameters, required feature fields and source roles, warmup, and threshold equality semantics without hardcoded symbols, suffixes, or timeframes.
-    evidence: Registry tests validate parameter schemas and bounds, required feature bindings, deterministic identities, and reuse of one definition across arbitrary target symbols and timeframes.
-  - id: decision_semantics
-    requirement: Each evaluation emits exactly one BUY, SELL, or SKIP decision per target closed bar with explicit reason codes and input lineage for one chosen target symbol and timeframe.
-    evidence: Golden decisions are compared with hand-calculated independent references, including threshold equality, rule precedence, and deterministic no-signal behavior.
-  - id: causal_no_lookahead
-    requirement: A decision at a target bar uses only feature values available at that bar's UTC closed-bar decision time and never a future row, future label, or unfinished higher-timeframe reference.
-    evidence: Perturbation tests change future target and late reference rows and prove that every earlier decision and its digest is unchanged.
-  - id: mtf_context_only
-    requirement: Reference symbols and timeframes act only as declared context inputs under RG-R02 availability and staleness semantics and never produce independent trade decisions.
-    evidence: Multi-series tests show context markets add no decision rows, stale or absent context yields SKIP with a reason, and suffixed symbols resolve deterministically.
-  - id: skip_and_conflict_handling
-    requirement: Missing, warmup, stale, non-finite, ambiguous, or conflicting inputs yield SKIP with an explicit reason, and BUY and SELL are never emitted together for one bar.
-    evidence: Boundary tests cover every SKIP reason, simultaneous BUY and SELL conditions, duplicated inputs that must not inflate counts, and equality at thresholds.
-  - id: immutable_decision_materialization
-    requirement: Decision-set identity binds strategy definition version, normalized configuration, exact feature-set identities and hashes, and temporal semantics to canonical sorted decision rows with a digest.
-    evidence: Staged preview, explicit confirmation, atomic promotion, idempotent replay with byte-identical output, and new identities for changed parameters or inputs are verified.
+  - id: local_runtime_boundary
+    requirement: Model runtimes are reached only through an Owner-configured loopback Ollama endpoint or a user-selected local ONNX file copied into application storage; no model pull or download, remote endpoint, redirect, credential, shell, or process command is exposed, and an unavailable runtime is reported as unavailable, never as model output.
+    evidence: Tests with a local mock runtime reject non-loopback hosts, redirects, pull and delete requests, path-taking requests, and oversized or malformed responses; CI uses no real network or installed runtime, and SECURITY.md records the adapter threat review.
+  - id: model_discovery
+    requirement: Discovery lists local Ollama models and selected ONNX files with their reported metadata as unregistered candidates and never registers, pulls, or runs a model without explicit confirmation.
+    evidence: Discovery tests cover an absent runtime, empty, duplicate, malformed, and changed listings, and prove that discovery alone creates no registry entry and no inference.
+  - id: immutable_model_identity
+    requirement: Model identity binds adapter ID, model name, content digest (Ollama manifest digest or ONNX file SHA-256), declared input and output schema, and normalized runtime configuration; a registered model whose content changes is quarantined, never silently re-identified.
+    evidence: Identity tests show deterministic IDs, new identities for any changed digest, schema, or configuration, and quarantine with a diagnostic naming the model when a registered digest no longer matches.
+  - id: typed_runtime_adapters
+    requirement: Ollama and ONNX adapters declare typed bounded runtime parameters, fixed decoding settings and seeds where the runtime supports them, and exact tensor or response schemas, and reject unknown parameters and outputs that do not match the declared schema.
+    evidence: Adapter tests with labeled fixture models and a mock Ollama runtime validate parameter bounds, schema mismatches, non-finite outputs, and rejection of unknown fields.
+  - id: verified_model_input
+    requirement: Inference consumes only registered READY RG-R02 feature sets or RG-R03 decision sets, re-verified at consumption and around every read, and each row's model input uses only values available at that row's UTC decision time.
+    evidence: Tests reject blocked, quarantined, tampered, and changed-identity inputs, and perturbation tests prove that future rows cannot change any earlier model input or output record.
+  - id: model_authority_boundary
+    requirement: Every model output is a research record with an explicit declared authority; RG-R04 executes only ADVISORY_ONLY outputs and never creates, alters, vetoes, or overrides an RG-R03 decision, sizes a position, or emits an order.
+    evidence: Tests show stored decision sets stay byte-identical after inference and comparison, requests for any other authority are refused in this phase, and no order, broker, or MT5 interface exists.
+  - id: inference_materialization
+    requirement: Inference-record identity binds model identity, input set identity and hashes, and normalized configuration to canonical sorted output rows with a digest, through staged preview, explicit confirmation, and atomic promotion; a replay that does not reproduce the output is recorded as non-deterministic, never overwritten.
+    evidence: Tests verify staged preview, confirmation, crash-recoverable promotion, byte-identical ONNX replay, recorded non-determinism for a mock runtime that varies its output, and new identities for changed inputs or configuration.
+  - id: model_comparison
+    requirement: Comparison covers two or more registered inference records over the same input identity and reports only descriptive agreement, coverage, error, and latency statistics, never PnL, win rate, profitability, or a claim of edge.
+    evidence: Comparison tests check hand-calculated agreement and coverage on fixtures, refuse records over different input identities, and assert that no performance or edge field exists in the output.
   - id: resource_cancel_recovery
-    requirement: Evaluation streams bounded batches off the UI thread with row quotas, backpressure, progress, cancellation, and safe recovery after interruption without force-killing work.
-    evidence: Capacity, quota, cancellation, interrupted-promotion restart, and error-propagation tests leave no partial registered decision set.
-  - id: desktop_strategy_ipc
-    requirement: The desktop flow selects a trusted feature set, chooses a strategy and typed parameters, validates, previews decisions with SKIP reasons, confirms, and inspects lineage and persisted runs.
-    evidence: Tauri IPC and frontend tests exercise the asynchronous flow, errors, cancellation, and results without layout redesign, and show no separate orders for context markets.
+    requirement: Inference runs off the UI thread in bounded batches with request timeouts, bounded concurrency, row and byte quotas, progress, cancellation, and safe recovery after interruption without force-killing an external runtime.
+    evidence: Capacity, timeout, quota, cancellation, runtime-crash, and interrupted-promotion restart tests leave no partial registered model or inference record.
+  - id: desktop_model_lab_ipc
+    requirement: The desktop flow discovers candidates, registers a model after explicit confirmation, selects a verified input, previews and confirms inference, compares records, and inspects lineage, with runtime unavailability shown truthfully.
+    evidence: Tauri IPC and frontend tests exercise the asynchronous flow, runtime-unavailable and error states, cancellation, and results without layout redesign or fabricated model output.
   - id: adversarial_tamper
-    requirement: Tampered decision outputs, manifests, or source feature sets are quarantined and cannot be consumed or reported as READY.
-    evidence: Checksum tamper, post-registration source tamper, missing-file, and changed-identity tests fail closed with diagnostics naming the affected identity.
+    requirement: Tampered model files, changed runtime digests, tampered inference outputs or manifests, and tampered upstream feature or decision sets are quarantined and cannot be consumed or reported as READY.
+    evidence: Checksum tamper, digest drift, missing-file, malformed-response, and post-registration upstream tamper tests fail closed with diagnostics naming the affected identity.
   - id: reproducible_acceptance
     requirement: Acceptance evidence records all declared gates against an exact clean commit and tree with source revision and reproducible toolchain.
     evidence: PowerShell and GitHub CI reports, per-gate logs, checksums, artifact identity, workflow status, and source SHA/tree agree exactly.
   - id: owner_ui_acceptance
-    requirement: Owner reviews the RG-R03 strategy workflow separately from automated fixture and IPC tests.
+    requirement: Owner reviews the RG-R04 Model Lab workflow separately from automated fixture and IPC tests.
     evidence: Manual UI review is explicitly recorded as pending, waived, or accepted and is never inferred from compilation or component tests.

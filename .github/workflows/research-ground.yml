@@ -214,7 +214,7 @@ jobs:
   attest-evidence:
     name: Attest acceptance evidence
     needs: windows-foundation
-    if: always() && needs.windows-foundation.outputs.evidence_artifact_id != '' && github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.ref == 'refs/heads/work/rg-r03-strategy-engine')
+    if: always() && needs.windows-foundation.outputs.evidence_artifact_id != '' && github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.ref == 'refs/heads/work/rg-r04-model-registry')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

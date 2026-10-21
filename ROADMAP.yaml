@@ -1,6 +1,6 @@
 schema_version: 1
 project: MAX Research Ground
-current_phase: RG-R03
+current_phase: RG-R04
 phases:
   - id: RG-R00
     name: Rust foundation, Tauri shell, governance, CI
@@ -20,11 +20,12 @@ phases:
   - id: RG-R03
     name: Deterministic Strategy Engine
     objective: Add deterministic native Rust strategies and isolated strategy contracts.
-    lifecycle: ACTIVE
+    lifecycle: ACCEPTED
+    acceptance_evidence: "Owner acceptance WITH_UI_REVIEW_WAIVED: https://github.com/maxqstudio/max-tev-ground/issues/7#issuecomment-6295197683; manual desktop click-through NOT_RUN, the Owner accepted the deliverable without manual UI review: waived, not tested; source SHA 3d3ceeb34958130f1e3f67309d0a213d10c971c3 (PR #9 merge); source tree SHA 4e8f1542a1d6a3872219c1dad9747dde5841bd88, identical to accepted candidate 277c85f90a36b96c67ff59cdff935b2b41e8175f; exact-main CI SUCCESS https://github.com/maxqstudio/max-tev-ground/actions/runs/39453334794; acceptance artifact research-ground-evidence-39453334794-1 digest sha256:d20645f018bff44982a38c6197b4bb5125cd071661058972e1a6fda7c5ac6d3b; candidate push CI https://github.com/maxqstudio/max-tev-ground/actions/runs/39446641385 and PR CI https://github.com/maxqstudio/max-tev-ground/actions/runs/39446648817 SUCCESS with 10 of 10 automated gates; synthetic fixtures only, real-market evaluation, profitability, PnL, OOS evidence and trading edge NOT_PROVEN; schema 6 to 7 upgrade of the Owner research database NOT AUTHORIZED and not run against Owner data; RG-R02 feature-output quota debt, deferred visual UX redesign and RG-R01 cancelPreview cancel-to-refresh UX debt are carried forward."
   - id: RG-R04
     name: Ollama and ONNX Model Registry
     objective: Add model discovery, immutable identity, runtime adapters, and model comparison.
-    lifecycle: PLANNED
+    lifecycle: ACTIVE
   - id: RG-R05
     name: Policy DSL and Extensibility
     objective: Add a typed policy DSL, visual policy builder, and isolated extensibility.

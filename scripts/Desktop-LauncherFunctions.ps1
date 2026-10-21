@@ -35,7 +35,7 @@ function Find-AcceptedExecutable {
         [Parameter(Mandatory = $true)][string]$Tree
     )
     # Phases whose exact-commit acceptance evidence may supply the desktop binary.
-    $acceptedPhases = @("RG-R00", "RG-R01", "RG-R02")
+    $acceptedPhases = @("RG-R00", "RG-R01", "RG-R02", "RG-R03")
     if (-not (Test-Path -LiteralPath $AcceptanceRoot -PathType Container)) { return $null }
 
     foreach ($directory in (Get-ChildItem -LiteralPath $AcceptanceRoot -Directory | Sort-Object LastWriteTimeUtc -Descending)) {

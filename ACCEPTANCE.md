@@ -51,9 +51,9 @@ RG-R03 Deterministic Strategy Engine was activated by governance PR #8 (merged a
 
 The twelve RG-R03 acceptance gates were frozen in `PHASE_MANIFEST.yaml` before implementation, and `rg-governance` rejects any change to that set: `strategy_input_authority`, `typed_strategy_registry`, `decision_semantics`, `causal_no_lookahead`, `mtf_context_only`, `skip_and_conflict_handling`, `immutable_decision_materialization`, `resource_cancel_recovery`, `desktop_strategy_ipc`, `adversarial_tamper`, `reproducible_acceptance`, and `owner_ui_acceptance`. The implementation did not change them.
 
-## RG-R03 implementation status
+## RG-R03 implementation and repair history
 
-RG-R03 is implemented on `work/rg-r03-strategy-engine`, branched from the validated `main` above. It is submitted for Control Room audit (`READY_FOR_CONTROL_ROOM_AUDIT`) and is not Owner accepted: Owner UI status and Owner acceptance are `PENDING`, and RG-R04 stays locked. The contract is in [CONTRACTS.md](CONTRACTS.md#decision-set-contracts-rg-r03-schema-1).
+RG-R03 was implemented on `work/rg-r03-strategy-engine`, branched from the validated `main` above, and submitted for Control Room audit as PR #9. Owner acceptance is recorded under [RG-R03 accepted checkpoint](#rg-r03-accepted-checkpoint). The contract is in [CONTRACTS.md](CONTRACTS.md#decision-set-contracts-rg-r03-schema-1).
 
 - Each automated gate is evidenced by tests named after it, run per gate by `scripts/Invoke-PhaseGateTests.ps1`. The tests cover:
   - the Rust engine, registry, store and persistence;
@@ -76,8 +76,31 @@ RG-R03 is implemented on `work/rg-r03-strategy-engine`, branched from the valida
 - The new desktop executable was still not run against the Owner's real database. Owner and Control Room decide when to take the first verified upgrade.
 - No real historical dataset was used; the Owner's market baseline remains `NOT_VERIFIED_BY_GITHUB_CI`. The Strategy Studio desktop page was exercised only by headless component and IPC tests, and manual Owner UI review is **pending, not tested**. The RG-R01 and RG-R02 UX debts are unchanged.
 
+## RG-R03 accepted checkpoint
+
+After the [Control Room re-audit #5587712394](https://github.com/maxqstudio/max-tev-ground/pull/9#pullrequestreview-5587712394), the Owner approved RG-R03 Deterministic Strategy Engine on 2026-10-20, as recorded in [Issue #7 comment #6295197683](https://github.com/maxqstudio/max-tev-ground/issues/7#issuecomment-6295197683). This is recorded as `OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED`: the Owner accepted the deliverable without requiring manual UI review. Manual desktop click-through was **NOT_RUN**: **waived, not tested**. It is not a manual interactive GUI pass, and visual or interactive quality is not assured by it.
+
+- Accepted candidate: PR #9 head `277c85f90a36b96c67ff59cdff935b2b41e8175f`, tree `4e8f1542a1d6a3872219c1dad9747dde5841bd88`. Push CI [#39446641385](https://github.com/maxqstudio/max-tev-ground/actions/runs/39446641385), including attestation, and PR CI [#39446648817](https://github.com/maxqstudio/max-tev-ground/actions/runs/39446648817) both succeeded, with 10 of 10 automated implementation gates passing (`AUTOMATED_PASS`).
+- Merge: PR #9 was merged on Owner authorization into `main` at `3d3ceeb34958130f1e3f67309d0a213d10c971c3`, with parents `fb019b92ea4bc2f02834a13355fe4f692d057f5b` (accepted `main`) and the audited candidate. Its tree, `4e8f1542a1d6a3872219c1dad9747dde5841bd88`, is identical to the accepted candidate's.
+- Exact-main CI: [run #39453334794](https://github.com/maxqstudio/max-tev-ground/actions/runs/39453334794) completed successfully on that SHA. Windows foundation checks and acceptance evidence attestation both succeeded. The uploaded artifact `research-ground-evidence-39453334794-1` has GitHub digest `sha256:d20645f018bff44982a38c6197b4bb5125cd071661058972e1a6fda7c5ac6d3b`.
+- Scope of the evidence: evaluation used labeled synthetic fixtures only. Real-market evaluation, profitability, PnL, OOS evidence, and any trading edge are **NOT_PROVEN**. Research decisions are not orders, and generating them does not demonstrate an edge.
+- **Owner database upgrade not authorized.** An RG-R03 build upgrades an existing research database from schema 6 to 7 on first start. The backup, receipt, restore, and rollback paths are source-tested, but no Owner-profile runtime test exists. This acceptance does not authorize running the new executable against the Owner's `research.sqlite3` or touching the Owner machine.
+- Known debts carried forward: the Strategy Studio click-through (NOT_RUN); the unauthorized Owner database upgrade; the RG-R02 feature-output quota checked before the Parquet footer ([Issue #4](https://github.com/maxqstudio/max-tev-ground/issues/4#issuecomment-6294996993)); the deferred RG-R02 visual redesign; and the RG-R01 `cancelPreview` cancel-to-refresh debt. None of them is waived by this closure.
+
+## RG-R04 activation (governance only)
+
+RG-R04 Ollama and ONNX Model Registry is activated by this governance change, as instructed in [Issue #7 comment #6295197683](https://github.com/maxqstudio/max-tev-ground/issues/7#issuecomment-6295197683). No model code exists: `builder_status` is `NOT_STARTED` and `automated_status` is `NOT_RUN`. Owner UI status and Owner acceptance are `PENDING`, and RG-R05–RG-R08 stay locked. Implementation waits for the Control Room audit and merge of this change.
+
+The thirteen RG-R04 acceptance gates are frozen in `PHASE_MANIFEST.yaml` before implementation, and `rg-governance` rejects any change to that set: `local_runtime_boundary`, `model_discovery`, `immutable_model_identity`, `typed_runtime_adapters`, `verified_model_input`, `model_authority_boundary`, `inference_materialization`, `model_comparison`, `resource_cancel_recovery`, `desktop_model_lab_ipc`, `adversarial_tamper`, `reproducible_acceptance`, and `owner_ui_acceptance`. Until gate-traceable tests exist, each gate is reported `NOT_RUN`; generic suite success is never inherited.
+
+The frozen scope keeps RG-R04 a local research registry:
+- Runtimes are reached only through an Owner-configured loopback Ollama endpoint or a user-selected local ONNX file. The application never pulls or downloads a model, and it never calls a remote endpoint.
+- Model outputs are research records. RG-R04 runs only `ADVISORY_ONLY` outputs; it never changes an RG-R03 decision, sizes a position, or emits an order. Applying other authorities belongs to the RG-R05 policy scope.
+- Model comparison reports descriptive agreement, coverage, error, and latency only, never PnL, win rate, or edge.
+- CI uses mock runtimes and labeled fixture models; no installed runtime or network is assumed.
+
 ## Acceptance runner
 
-`RUN_ACCEPTANCE.ps1` is scoped to the RG-R03 candidate branch `work/rg-r03-strategy-engine` and to the governance-only activation branch `work/rg-r02-closure-rg-r03-activation`. It runs non-interactively from the authorized Windows root. It checks pinned Rust/Node toolchains, Windows prerequisites, roadmap synchronization, CI evidence contracts, Rust formatting/tests/lint/build, frontend lint/typecheck/tests/build, the phase gate-traceable tests, and the Tauri build when MSVC is available. It writes per-command logs and a checksummed report bound to the exact candidate SHA/tree. It never launches the desktop or reads, copies, or modifies the legacy research baseline.
+`RUN_ACCEPTANCE.ps1` is scoped to the RG-R04 candidate branch `work/rg-r04-model-registry` and to the governance-only activation branch `work/rg-r03-closure-rg-r04-activation`. It runs non-interactively from the authorized Windows root. It checks pinned Rust/Node toolchains, Windows prerequisites, roadmap synchronization, CI evidence contracts, Rust formatting/tests/lint/build, frontend lint/typecheck/tests/build, the phase gate-traceable tests, and the Tauri build when MSVC is available. It writes per-command logs and a checksummed report bound to the exact candidate SHA/tree. It never launches the desktop or reads, copies, or modifies the legacy research baseline.
 
-GitHub CI runs the same gate-traceable step and uploads source-bound evidence, including the per-gate logs. A phase that records `builder_status: NOT_STARTED` runs no gate tests and reports every gate `NOT_RUN`. RG-R04–RG-R08 remain planned.
+GitHub CI runs the same gate-traceable step and uploads source-bound evidence, including the per-gate logs. While RG-R04 records `builder_status: NOT_STARTED`, that step runs no gate tests, every RG-R04 gate is `NOT_RUN`, and the report's automated status is `NOT_RUN`; the local runner therefore exits with its not-passed code 3 even when every check succeeds. RG-R05–RG-R08 remain planned.

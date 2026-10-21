@@ -8,29 +8,31 @@ import type { ActiveImportState, DatasetCatalogEntry, DatasetCatalogProgress, Im
 
 const fixtureSnapshot: FoundationSnapshot = {
   project: "MAX Research Ground",
-  current_phase: "RG-R03",
+  current_phase: "RG-R04",
   phase_lifecycle: "ACTIVE",
-  builder_status: "IMPLEMENTED",
-  automated_status: "AUTOMATED_PASS",
+  builder_status: "NOT_STARTED",
+  automated_status: "NOT_RUN",
   owner_ui_status: "PENDING",
   owner_acceptance: "PENDING",
   next_phase_unlocked: false,
   deliverables: {
-    verified_feature_input: "TESTED",
-    strategy_registry: "TESTED",
-    decision_engine: "TESTED",
-    causal_context_joins: "TESTED",
-    immutable_decision_sets: "TESTED",
-    resource_controls: "TESTED",
-    strategy_studio_ui: "TESTED",
-    acceptance_evidence: "TESTED",
+    local_runtime_boundary: "PLANNED",
+    model_discovery: "PLANNED",
+    model_identity_registry: "PLANNED",
+    runtime_adapters: "PLANNED",
+    verified_model_input: "PLANNED",
+    immutable_inference_records: "PLANNED",
+    model_comparison: "PLANNED",
+    resource_controls: "PLANNED",
+    model_lab_ui: "PLANNED",
+    acceptance_evidence: "PLANNED",
   },
   pages: [
     { id: "overview", status: "IMPLEMENTED" },
     { id: "data-ground", status: "OWNER_ACCEPTED" },
     { id: "feature-studio", status: "OWNER_ACCEPTED" },
-    { id: "strategy-studio", status: "IN_PROGRESS" },
-    { id: "model-lab", status: "PLANNED" },
+    { id: "strategy-studio", status: "OWNER_ACCEPTED" },
+    { id: "model-lab", status: "ACTIVE_NOT_STARTED" },
     { id: "policy-studio", status: "PLANNED" },
     { id: "experiments", status: "PLANNED" },
     { id: "results", status: "PLANNED" },
@@ -65,6 +67,20 @@ const fixtureSnapshot: FoundationSnapshot = {
       known_debts: [
         "Manual desktop click-through was NOT_RUN; the Owner waived UI review (UI_REVIEW_WAIVED), so interactive use remains unverified.",
         "The Owner finds the UI confusing and visually unsatisfactory; visual redesign is deferred, not accepted or waived.",
+      ],
+    },
+    {
+      phase: "RG-R03",
+      owner_acceptance: "OWNER_ACCEPTED",
+      owner_ui_status: "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED",
+      source_sha: "3d3ceeb34958130f1e3f67309d0a213d10c971c3",
+      source_tree_sha: "4e8f1542a1d6a3872219c1dad9747dde5841bd88",
+      ci_run_url: "https://github.com/maxqstudio/max-tev-ground/actions/runs/39453334794",
+      owner_issue_url: "https://github.com/maxqstudio/max-tev-ground/issues/7#issuecomment-6295197683",
+      known_debts: [
+        "Manual desktop click-through of Strategy Studio was NOT_RUN; the Owner accepted the deliverable without manual UI review (UI_REVIEW_WAIVED), so interactive use remains unverified.",
+        "The RG-R03 build upgrades an existing research database from schema 6 to 7 on first start; no Owner-profile runtime test exists, and upgrading the Owner's research.sqlite3 is NOT AUTHORIZED by this acceptance.",
+        "RG-R02 maintenance debt: the Feature Studio feature-output quota is checked before the Parquet footer is written; recorded on Issue #4 for an Owner-approved targeted repair and unresolved.",
       ],
     },
   ],
@@ -138,16 +154,18 @@ describe("desktop shell navigation", () => {
   it("loads the governance snapshot through the Tauri IPC boundary", async () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "MAX Research Ground" })).toBeTruthy();
-    expect(screen.getByText("Builder status").nextElementSibling?.textContent).toBe("IMPLEMENTED");
-    expect(screen.getByText("AUTOMATED PASS")).toBeTruthy();
+    expect(screen.getByText("Builder status").nextElementSibling?.textContent).toBe("NOT STARTED");
+    expect(screen.getByText("Automated gates").nextElementSibling?.textContent).toBe("NOT RUN");
     expect(screen.getByText("Owner UI review").nextElementSibling?.textContent).toBe("PENDING");
     expect(screen.getAllByText("LOCKED")).toHaveLength(2);
-    expect(screen.getByText("Strategy registry")).toBeTruthy();
+    expect(screen.getByText("Model identity registry")).toBeTruthy();
     expect(screen.getByText(/RG-R02: Owner accepted\. UI review waived, not tested\./)).toBeTruthy();
+    expect(screen.getByText(/RG-R03: Owner accepted\. UI review waived, not tested\./)).toBeTruthy();
     expect(screen.getByText(/visual redesign is deferred, not accepted or waived/)).toBeTruthy();
+    expect(screen.getByText(/research\.sqlite3 is NOT AUTHORIZED/)).toBeTruthy();
   });
 
-  it("keeps accepted Feature Studio usable and routes the active Strategy Studio to its workflow", async () => {
+  it("keeps accepted Feature and Strategy Studios usable and shows Model Lab as authorized but not started", async () => {
     mockIPC((command) => {
       if (command === "get_foundation_status") return fixtureSnapshot;
       if (command === "get_feature_registry") {
@@ -184,10 +202,13 @@ describe("desktop shell navigation", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Strategy Studio" })).toBeTruthy();
     expect(await screen.findByText(/No READY feature set is registered/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Model Lab/ }));
-    expect(await screen.findByRole("heading", { name: "Model Lab is not implemented yet" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Model Lab implementation has not started" })).toBeTruthy();
+    expect(screen.getByText("ACTIVE NOT STARTED")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Policy Studio/ }));
+    expect(await screen.findByRole("heading", { name: "Policy Studio is not implemented yet" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Overview/ }));
     expect(await screen.findByText(/Desktop UI and CSV import review were waived, NOT TESTED/)).toBeTruthy();
-    expect(screen.getAllByText(/Known UX debt \(unresolved\)/)).toHaveLength(3);
+    expect(screen.getAllByText(/Known debt \(unresolved\)/)).toHaveLength(6);
   });
 
   it("shows bounded catalog verification progress and cancellation", async () => {
