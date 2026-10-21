@@ -1468,3 +1468,255 @@ fn gate_adversarial_tamper_runtime_digest_drift_blocks_inference_with_named_diag
         "no generation ran against drifted content"
     );
 }
+
+// ---------------------------------------------------------------- PR #11 audit repairs
+
+fn ollama_request(model_id: &str, feature_set: &str) -> rg_model_registry::InferenceRequest {
+    feature_request(
+        model_id,
+        feature_set,
+        &[("fast", feature("fast")), ("slow", feature("slow"))],
+    )
+}
+
+fn assert_digest_refusal(error: ModelError, model_id: &str, status: &str, phase: &str) {
+    match error {
+        ModelError::ModelNotUsable {
+            model_id: named,
+            status: actual,
+            reason,
+        } => {
+            let reason = reason.unwrap();
+            assert_eq!(named, model_id);
+            assert_eq!(actual, status, "{reason}");
+            assert!(reason.contains(phase), "{reason}");
+            assert!(reason.contains(model_id), "{reason}");
+            assert!(reason.contains(FIXTURE_MODEL), "{reason}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn gate_adversarial_tamper_ollama_digest_flip_after_preview_refuses_confirmation() {
+    let fixture = Fixture::new();
+    let feature_set = fixture.standard_feature_set();
+    let mock = MockOllama::start(MockBehavior::Normal);
+    let model_id = fixture.register_ollama(&mock, 21, vec![float_output("score", -2.0, 2.0)]);
+    // A record confirmed while the runtime served the registered content.
+    let historical = fixture.infer(&ollama_request(&model_id, &feature_set));
+    let historical_output = fixture
+        .record_dir(&historical.record_id)
+        .join("inference.parquet");
+    let historical_bytes = std::fs::read(&historical_output).unwrap();
+
+    let prepared = fixture
+        .prepare(&feature_request(
+            &model_id,
+            &feature_set,
+            &[("fast", feature("slow")), ("slow", feature("fast"))],
+        ))
+        .unwrap();
+    mock.set_models(vec![MockModel {
+        name: FIXTURE_MODEL.into(),
+        digest: FIXTURE_DIGEST_CHANGED.into(),
+    }]);
+    let error = fixture.lab().commit_inference(prepared).unwrap_err();
+    let ModelError::ModelNotUsable { reason, .. } = &error else {
+        panic!("unexpected {error:?}");
+    };
+    let reason = reason.clone().unwrap();
+    assert!(
+        reason.contains(FIXTURE_DIGEST) && reason.contains(FIXTURE_DIGEST_CHANGED),
+        "{reason}"
+    );
+    assert_digest_refusal(error, &model_id, "QUARANTINED", "at confirmation");
+    assert_eq!(fixture.registry_rows("inference_records"), 1);
+    assert_eq!(fixture.staging_entries(), 0);
+    assert!(fixture
+        .lab()
+        .list_attempts()
+        .unwrap()
+        .iter()
+        .any(|attempt| attempt.status == "FAILED"
+            && attempt.diagnostic_code.as_deref() == Some("MODEL_NOT_USABLE")));
+
+    // The earlier immutable record is not rewritten by the later runtime drift.
+    let entry = fixture
+        .lab()
+        .inspect_inference_record(&historical.record_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.status, InferenceRecordStatus::Ready);
+    assert_eq!(
+        entry.manifest.unwrap().identity.model.content_digest,
+        FIXTURE_DIGEST
+    );
+    assert_eq!(std::fs::read(&historical_output).unwrap(), historical_bytes);
+    assert_eq!(
+        fixture
+            .lab()
+            .inspect_model(&model_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        ModelStatus::Quarantined
+    );
+}
+
+#[test]
+fn gate_adversarial_tamper_ollama_digest_flip_mid_evaluation_fails_closed() {
+    let fixture = Fixture::new();
+    let feature_set = fixture.standard_feature_set();
+    let mock = MockOllama::start(MockBehavior::Normal);
+    let model_id = fixture.register_ollama(&mock, 22, vec![float_output("score", -2.0, 2.0)]);
+    let request = ollama_request(&model_id, &feature_set);
+
+    // Flipped early: the periodic check stops the run at the next checkpoint.
+    let base = mock.generations();
+    mock.flip_digest_after(base + 3, FIXTURE_DIGEST_CHANGED);
+    let error = fixture.prepare(&request).unwrap_err();
+    assert_digest_refusal(error, &model_id, "QUARANTINED", "during inference");
+    assert_eq!(
+        mock.generations() - base,
+        16,
+        "the run stopped at its first digest checkpoint instead of answering all 53 rows"
+    );
+    assert_eq!(fixture.staging_entries(), 0);
+    assert_eq!(fixture.registry_rows("inference_records"), 0);
+
+    // Flipped after the last periodic checkpoint: the after-run check discards the output.
+    mock.set_models(vec![MockModel {
+        name: FIXTURE_MODEL.into(),
+        digest: FIXTURE_DIGEST.into(),
+    }]);
+    let base = mock.generations();
+    mock.flip_digest_after(base + 50, FIXTURE_DIGEST_CHANGED);
+    let error = fixture.prepare(&request).unwrap_err();
+    assert_digest_refusal(error, &model_id, "QUARANTINED", "after inference");
+    assert_eq!(mock.generations() - base, 53);
+    assert_eq!(fixture.staging_entries(), 0);
+    assert_eq!(fixture.registry_rows("inference_records"), 0);
+}
+
+#[test]
+fn gate_resource_cancel_recovery_ollama_runtime_unavailable_at_confirm_refuses() {
+    let fixture = Fixture::new();
+    let feature_set = fixture.standard_feature_set();
+    let mock = MockOllama::start(MockBehavior::Normal);
+    let model_id = fixture.register_ollama(&mock, 23, vec![float_output("score", -2.0, 2.0)]);
+    let prepared = fixture
+        .prepare(&ollama_request(&model_id, &feature_set))
+        .unwrap();
+    drop(mock);
+    let error = fixture.lab().commit_inference(prepared).unwrap_err();
+    assert_digest_refusal(error, &model_id, "RUNTIME_UNAVAILABLE", "at confirmation");
+    assert_eq!(fixture.registry_rows("inference_records"), 0);
+    assert_eq!(fixture.staging_entries(), 0);
+}
+
+fn comparison_lab(
+    fixture: &Fixture,
+    cells: u64,
+    copy_bytes: u64,
+) -> rg_model_registry::store::ModelLabStore {
+    rg_model_registry::store::ModelLabStore::open_with_limits(
+        &fixture.root,
+        std::sync::Arc::clone(&fixture.strategies),
+        rg_model_registry::store::ModelLabLimits {
+            max_comparison_cells: cells,
+            max_comparison_copy_bytes: copy_bytes,
+            ..rg_model_registry::store::DEFAULT_LIMITS
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn gate_resource_cancel_recovery_comparison_budget_counts_records_rows_and_outputs_before_copying()
+{
+    let fixture = Fixture::new();
+    let feature_set = fixture.standard_feature_set();
+    let one_output = register_spread(&fixture);
+    let two_outputs = fixture.register_onnx(
+        "pair.onnx",
+        // outputs [fast - slow, fast]
+        &onnx::linear_model(2, &[1.0, 1.0, -1.0, 0.0], &[0.0, 0.0]),
+        &["fast", "slow"],
+        vec![
+            float_output("spread", -10.0, 10.0),
+            float_output("echo", -10.0, 10.0),
+        ],
+    );
+    let a = fixture.infer(&spread_request(&one_output, &feature_set));
+    let b = fixture.infer(&spread_request(&two_outputs, &feature_set));
+    let request = ComparisonRequest {
+        record_ids: vec![a.record_id.clone(), b.record_id.clone()],
+    };
+    // 60 rows x (1 + 1) + 60 rows x (2 + 1) = 300 cells.
+    let bytes = std::fs::metadata(fixture.record_dir(&a.record_id).join("inference.parquet"))
+        .unwrap()
+        .len()
+        + std::fs::metadata(fixture.record_dir(&b.record_id).join("inference.parquet"))
+            .unwrap()
+            .len();
+    let at_limit = comparison_lab(&fixture, 300, bytes);
+    let report = at_limit.compare(&request, &never()).unwrap();
+    assert_eq!(
+        report.pairs[0].fields.len(),
+        1,
+        "only the shared spread output is paired"
+    );
+    assert_eq!(report.pairs[0].fields[0].rows_both_ok, 53);
+    assert_eq!(report.pairs[0].fields[0].max_absolute_difference, Some(0.0));
+
+    for (cells, copy_bytes) in [(299, bytes), (300, bytes - 1)] {
+        let lab = comparison_lab(&fixture, cells, copy_bytes);
+        assert!(matches!(
+            lab.compare(&request, &never()),
+            Err(ModelError::ResourceQuota(_))
+        ));
+        assert_eq!(fixture.staging_entries(), 0, "nothing was copied");
+    }
+    // Adding a third record grows the requirement by its own rows x (outputs + 1).
+    let c = fixture.infer(&feature_request(
+        &one_output,
+        &feature_set,
+        &[("fast", feature("roc")), ("slow", feature("fast"))],
+    ));
+    let three = ComparisonRequest {
+        record_ids: vec![a.record_id, b.record_id, c.record_id],
+    };
+    assert!(matches!(
+        comparison_lab(&fixture, 300, u64::MAX).compare(&three, &never()),
+        Err(ModelError::ResourceQuota(_))
+    ));
+    assert!(comparison_lab(&fixture, 420, u64::MAX)
+        .compare(&three, &never())
+        .is_ok());
+    assert_eq!(fixture.staging_entries(), 0);
+}
+
+#[test]
+fn gate_resource_cancel_recovery_cancelled_comparison_leaves_no_copies() {
+    let fixture = Fixture::new();
+    let feature_set = fixture.standard_feature_set();
+    let model_id = register_spread(&fixture);
+    let a = fixture.infer(&spread_request(&model_id, &feature_set));
+    let b = fixture.infer(&feature_request(
+        &model_id,
+        &feature_set,
+        &[("fast", feature("slow")), ("slow", feature("fast"))],
+    ));
+    let cancelled = AtomicBool::new(true);
+    assert!(matches!(
+        fixture.lab().compare(
+            &ComparisonRequest {
+                record_ids: vec![a.record_id, b.record_id]
+            },
+            &cancelled
+        ),
+        Err(ModelError::Cancelled)
+    ));
+    assert_eq!(fixture.staging_entries(), 0);
+}

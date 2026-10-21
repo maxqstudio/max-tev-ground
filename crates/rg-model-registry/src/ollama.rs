@@ -9,6 +9,7 @@ use serde_json::{json, Map, Value};
 use crate::{
     http::{self, HttpLimits, LoopbackEndpoint, RuntimeCall, RuntimeError},
     spec::{is_sha256, OutputField, OutputKind, RowReason},
+    ModelError,
 };
 
 pub const PROMPT_TEMPLATE_VERSION: u16 = 1;
@@ -107,6 +108,48 @@ pub fn parse_listing(body: &[u8]) -> Result<Vec<OllamaListing>, RuntimeError> {
             })
         })
         .collect()
+}
+
+/// Checks that the runtime still lists `model_name` with exactly the registered manifest digest.
+///
+/// Ollama generates by model name and reports no content digest with an answer, so a run cannot
+/// be pinned atomically to registered content. Callers repeat this check before, during, and
+/// after a run and again at confirmation; a change that is reverted between two checks cannot be
+/// detected.
+pub(crate) fn verify_registered_digest(
+    endpoint: &LoopbackEndpoint,
+    model_id: &str,
+    model_name: &str,
+    registered_digest: &str,
+    when: &str,
+) -> Result<(), ModelError> {
+    let listing = list_models(endpoint).map_err(|error| ModelError::ModelNotUsable {
+        model_id: model_id.into(),
+        status: "RUNTIME_UNAVAILABLE".into(),
+        reason: Some(format!(
+            "{when}, model {model_id} ({model_name}) could not be checked: {error}"
+        )),
+    })?;
+    let listed = listing
+        .iter()
+        .filter(|entry| entry.name == model_name)
+        .collect::<Vec<_>>();
+    let problem = match listed.as_slice() {
+        [entry] if entry.digest == registered_digest => return Ok(()),
+        [] => "is no longer installed in the runtime".to_owned(),
+        [entry] => format!(
+            "now has digest {} instead of registered {registered_digest}",
+            entry.digest
+        ),
+        _ => "is listed more than once by the runtime".to_owned(),
+    };
+    Err(ModelError::ModelNotUsable {
+        model_id: model_id.into(),
+        status: "QUARANTINED".into(),
+        reason: Some(format!(
+            "{when}, model {model_id} ({model_name}) {problem}; no output was registered under the old identity"
+        )),
+    })
 }
 
 /// Fixed-decoding settings sent with every generation.

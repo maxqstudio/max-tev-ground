@@ -183,13 +183,19 @@ impl RowModel for OnnxRows<'_> {
     }
 }
 
+/// Generations between re-checks of the registered Ollama digest during one run.
+pub(crate) const DIGEST_CHECK_INTERVAL: u64 = 16;
+
 pub(crate) struct OllamaRows<'a> {
     pub endpoint: LoopbackEndpoint,
+    pub model_id: &'a str,
     pub model_name: &'a str,
+    pub registered_digest: &'a str,
     pub settings: GenerationSettings,
     pub fields: &'a [String],
     pub outputs: &'a [OutputField],
     pub timeout: Duration,
+    pub generations: u64,
 }
 
 impl RowModel for OllamaRows<'_> {
@@ -203,6 +209,16 @@ impl RowModel for OllamaRows<'_> {
             &prompt,
             self.timeout,
         )?;
+        self.generations += 1;
+        if self.generations.is_multiple_of(DIGEST_CHECK_INTERVAL) {
+            ollama::verify_registered_digest(
+                &self.endpoint,
+                self.model_id,
+                self.model_name,
+                self.registered_digest,
+                "during inference",
+            )?;
+        }
         Ok(match ollama::parse_output(&answer, self.outputs) {
             Ok(values) => RowOutcome::Ok(values),
             Err(reason) => RowOutcome::Invalid(reason),

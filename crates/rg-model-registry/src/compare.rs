@@ -3,6 +3,12 @@
 //! Reports coverage, invalid-output rates, agreement between records, absolute differences
 //! between their numeric outputs, and recorded latencies. It has no labels, prices, or positions,
 //! so it reports no accuracy against outcomes, PnL, win rate, profitability, or edge.
+//!
+//! Resources are bounded in aggregate before anything is copied or allocated: the selected
+//! records' rows times (outputs + 1) must fit [`ModelLabLimits::max_comparison_cells`], and their
+//! output files together must fit [`ModelLabLimits::max_comparison_copy_bytes`]. Each loaded cell
+//! takes at most 8 bytes (a number, or a one-byte label index), and only one private copy exists
+//! at a time.
 
 use std::{
     collections::BTreeSet,
@@ -11,18 +17,21 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
     inference::copy_hashed,
     input::{self, ColumnType, InputTable},
     spec::{InferenceColumnKind, InferenceRecordManifest, OutputKind},
-    store::ModelLabStore,
+    store::{ModelLabLimits, ModelLabStore},
     ModelError,
 };
 
 pub const MAX_COMPARED_RECORDS: usize = 8;
-pub const MAX_COMPARED_ROWS: u64 = 5_000_000;
+/// Upper bound on bytes held per loaded cell: an `f64`, or a one-byte label index.
+pub const BYTES_PER_COMPARISON_CELL: u64 = 8;
+const MISSING_LABEL: u8 = u8::MAX;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -81,19 +90,45 @@ pub struct ComparisonReport {
 
 pub const COMPARISON_NOTICE: &str = "Descriptive statistics of model outputs over one shared input: coverage, invalid-output rate, agreement between models, numeric differences between models, and recorded latency. They are not accuracy against outcomes and not evidence of PnL, win rate, profitability, or edge.";
 
-#[derive(Clone, Debug, PartialEq)]
-enum Value {
-    Missing,
-    Number(f64),
-    Label(String),
+/// One output column held compactly: numbers with `NaN` for rows without an OK value (OK values
+/// are always finite), or label indexes into the declared labels with [`MISSING_LABEL`].
+enum StoredColumn {
+    Numbers(Vec<f64>),
+    Labels(Vec<u8>),
 }
 
 struct LoadedRecord {
     manifest: InferenceRecordManifest,
-    decision_times: Vec<i64>,
-    ok: Vec<bool>,
-    /// Indexed by declared output, then by row.
-    values: Vec<Vec<Value>>,
+    /// SHA-256 over the record's decision times in row order.
+    decision_times_sha256: Vec<u8>,
+    rows: u64,
+    /// Indexed by declared output.
+    values: Vec<StoredColumn>,
+}
+
+/// Cells a comparison would hold: for each record, rows times (outputs + 1). Refuses an
+/// overflowing or over-budget request before anything is copied or allocated.
+pub fn comparison_cells(
+    records: &[(u64, usize)],
+    limits: &ModelLabLimits,
+) -> Result<u64, ModelError> {
+    let mut total = 0u64;
+    for (rows, outputs) in records {
+        let cells = (*outputs as u64)
+            .checked_add(1)
+            .and_then(|columns| rows.checked_mul(columns))
+            .and_then(|cells| total.checked_add(cells));
+        total = match cells {
+            Some(total) if total <= limits.max_comparison_cells => total,
+            _ => {
+                return Err(ModelError::ResourceQuota(format!(
+                    "comparing these records needs more than {} cells (records x rows x (outputs + 1)); select fewer records or outputs",
+                    limits.max_comparison_cells
+                )))
+            }
+        };
+    }
+    Ok(total)
 }
 
 fn column_type(kind: InferenceColumnKind) -> ColumnType {
@@ -123,45 +158,66 @@ impl ModelLabStore {
                 "select between 2 and {MAX_COMPARED_RECORDS} different inference records"
             )));
         }
-        let mut records = Vec::with_capacity(request.record_ids.len());
+        // Verify every record and check the aggregate budget before copying or allocating.
+        let limits = self.limits();
+        let mut selected: Vec<(InferenceRecordManifest, std::path::PathBuf)> =
+            Vec::with_capacity(request.record_ids.len());
+        let mut copy_bytes = 0u64;
+        for record_id in &request.record_ids {
+            let (manifest, path) = self.usable_record(record_id)?;
+            if let Some((first, _)) = selected.first() {
+                if first.identity.input != manifest.identity.input {
+                    return Err(ModelError::ComparisonRefused(format!(
+                        "{record_id} was computed over a different input identity than {}",
+                        first.record_id
+                    )));
+                }
+            }
+            copy_bytes = copy_bytes
+                .checked_add(fs::metadata(&path)?.len())
+                .filter(|bytes| *bytes <= limits.max_comparison_copy_bytes)
+                .ok_or_else(|| {
+                    ModelError::ResourceQuota(format!(
+                        "the selected record outputs exceed the {} byte comparison copy budget",
+                        limits.max_comparison_copy_bytes
+                    ))
+                })?;
+            selected.push((manifest, path));
+        }
+        comparison_cells(
+            &selected
+                .iter()
+                .map(|(manifest, _)| (manifest.row_count, manifest.outputs.len()))
+                .collect::<Vec<_>>(),
+            &limits,
+        )?;
+        let mut records: Vec<LoadedRecord> = Vec::with_capacity(selected.len());
         let scratch = self.staging_root().join(Uuid::now_v7().to_string());
         fs::create_dir(&scratch)?;
         let result = (|| {
-            for record_id in &request.record_ids {
-                let (manifest, path) = self.usable_record(record_id)?;
-                if let Some(first) = records.first() {
-                    let first: &LoadedRecord = first;
-                    if first.manifest.identity.input != manifest.identity.input {
-                        return Err(ModelError::ComparisonRefused(format!(
-                            "{record_id} was computed over a different input identity than {}",
-                            first.manifest.record_id
-                        )));
-                    }
-                }
-                if manifest.row_count > MAX_COMPARED_ROWS {
-                    return Err(ModelError::ResourceQuota(format!(
-                        "comparison is limited to {MAX_COMPARED_ROWS} rows"
-                    )));
-                }
-                let copy = scratch.join(format!("{}.parquet", records.len()));
-                let (digest, _) = copy_hashed(&path, &copy, u64::MAX, cancel)?;
+            for (index, (manifest, path)) in selected.into_iter().enumerate() {
+                let copy = scratch.join(format!("{index}.parquet"));
+                let (digest, _) =
+                    copy_hashed(&path, &copy, limits.max_comparison_copy_bytes, cancel)?;
                 if digest != manifest.output_sha256 {
                     return Err(ModelError::RecordNotUsable {
-                        record_id: record_id.clone(),
+                        record_id: manifest.record_id.clone(),
                         status: "QUARANTINED".into(),
                     });
                 }
-                records.push(load(manifest, &copy, cancel)?);
+                let loaded = load(manifest, &copy, cancel)?;
+                // Only one private copy exists at a time.
+                fs::remove_file(&copy)?;
+                records.push(loaded);
             }
             Ok(())
         })();
         let _ = fs::remove_dir_all(&scratch);
         result?;
-        let rows = records[0].decision_times.len();
-        if records
-            .iter()
-            .any(|record| record.decision_times != records[0].decision_times)
-        {
+        let rows = records[0].rows;
+        if records.iter().any(|record| {
+            record.rows != rows || record.decision_times_sha256 != records[0].decision_times_sha256
+        }) {
             return Err(ModelError::ComparisonRefused(
                 "records do not share the same decision times".into(),
             ));
@@ -202,7 +258,7 @@ impl ModelLabStore {
             },
             input_id: input.id.clone(),
             input_output_sha256: input.output_sha256.clone(),
-            rows: rows as u64,
+            rows,
             records: coverage,
             pairs,
             notice: COMPARISON_NOTICE.into(),
@@ -243,31 +299,47 @@ fn load(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut decision_times = Vec::with_capacity(manifest.row_count as usize);
-    let mut ok = Vec::with_capacity(manifest.row_count as usize);
-    let mut values = vec![Vec::with_capacity(manifest.row_count as usize); manifest.outputs.len()];
+    let rows = usize::try_from(manifest.row_count)
+        .map_err(|_| ModelError::ResourceQuota("record is too large to compare".into()))?;
+    let mut times = Sha256::new();
+    let mut count = 0u64;
+    let mut values = manifest
+        .outputs
+        .iter()
+        .map(|output| match output.kind {
+            OutputKind::Float64 { .. } => StoredColumn::Numbers(Vec::with_capacity(rows)),
+            OutputKind::Category { .. } => StoredColumn::Labels(Vec::with_capacity(rows)),
+        })
+        .collect::<Vec<_>>();
     let read = input::read_rows(path, &table, |row| -> Result<(), ModelError> {
-        if decision_times.len() % 1024 == 0 && cancel.load(Ordering::Relaxed) {
+        if count.is_multiple_of(1024) && cancel.load(Ordering::Relaxed) {
             return Err(ModelError::Cancelled);
         }
-        decision_times.push(row.time(table.decision_time_column));
+        count += 1;
+        times.update(row.time(table.decision_time_column).to_be_bytes());
         let row_ok = row.text(status_column) == Some("OK");
-        ok.push(row_ok);
-        for ((output, column), values) in manifest
+        for ((output, column), stored) in manifest
             .outputs
             .iter()
             .zip(&output_columns)
             .zip(&mut values)
         {
-            values.push(match (&output.kind, row_ok) {
-                (_, false) => Value::Missing,
-                (OutputKind::Float64 { .. }, true) => {
-                    row.float(*column).map_or(Value::Missing, Value::Number)
+            match (stored, &output.kind) {
+                (StoredColumn::Numbers(numbers), _) => numbers.push(
+                    row.float(*column)
+                        .filter(|value| row_ok && value.is_finite())
+                        .unwrap_or(f64::NAN),
+                ),
+                (StoredColumn::Labels(labels), OutputKind::Category { labels: declared }) => {
+                    let index = row
+                        .text(*column)
+                        .filter(|_| row_ok)
+                        .and_then(|label| declared.iter().position(|known| known == label))
+                        .map_or(MISSING_LABEL, |index| index as u8);
+                    labels.push(index);
                 }
-                (OutputKind::Category { .. }, true) => row
-                    .text(*column)
-                    .map_or(Value::Missing, |label| Value::Label(label.into())),
-            });
+                (StoredColumn::Labels(labels), _) => labels.push(MISSING_LABEL),
+            }
         }
         Ok(())
     })
@@ -275,8 +347,8 @@ fn load(
     read?;
     Ok(LoadedRecord {
         manifest,
-        decision_times,
-        ok,
+        decision_times_sha256: times.finalize().to_vec(),
+        rows: count,
         values,
     })
 }
@@ -298,33 +370,47 @@ fn compare_pair(left: &LoadedRecord, right: &LoadedRecord) -> PairComparison {
         else {
             continue;
         };
-        let pairs = left.values[left_index]
-            .iter()
-            .zip(&right.values[right_index])
-            .zip(left.ok.iter().zip(&right.ok))
-            .filter(|(_, (l, r))| **l && **r)
-            .map(|(values, _)| values);
+        let right_output = &right.manifest.outputs[right_index];
         let mut both = 0u64;
         let mut agreeing = 0u64;
         let mut difference_sum = 0.0f64;
         let mut difference_max: Option<f64> = None;
-        for (l, r) in pairs {
-            match (l, r) {
-                (Value::Label(l), Value::Label(r)) => {
-                    both += 1;
-                    if l == r {
-                        agreeing += 1;
+        match (&left.values[left_index], &right.values[right_index]) {
+            (StoredColumn::Numbers(l), StoredColumn::Numbers(r)) => {
+                for (l, r) in l.iter().zip(r) {
+                    if l.is_nan() || r.is_nan() {
+                        continue;
                     }
-                }
-                (Value::Number(l), Value::Number(r)) => {
                     both += 1;
                     let difference = (l - r).abs();
                     difference_sum += difference;
                     difference_max =
                         Some(difference_max.map_or(difference, |max| max.max(difference)));
                 }
-                _ => {}
             }
+            (StoredColumn::Labels(l), StoredColumn::Labels(r)) => {
+                let (
+                    OutputKind::Category {
+                        labels: left_labels,
+                    },
+                    OutputKind::Category {
+                        labels: right_labels,
+                    },
+                ) = (&output.kind, &right_output.kind)
+                else {
+                    continue;
+                };
+                for (l, r) in l.iter().zip(r) {
+                    if *l == MISSING_LABEL || *r == MISSING_LABEL {
+                        continue;
+                    }
+                    both += 1;
+                    if left_labels[*l as usize] == right_labels[*r as usize] {
+                        agreeing += 1;
+                    }
+                }
+            }
+            _ => continue,
         }
         let category = matches!(output.kind, OutputKind::Category { .. });
         fields.push(FieldAgreement {
@@ -354,4 +440,62 @@ fn same_kind(left: &OutputKind, right: &OutputKind) -> bool {
         (OutputKind::Float64 { .. }, OutputKind::Float64 { .. })
             | (OutputKind::Category { .. }, OutputKind::Category { .. })
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::DEFAULT_LIMITS;
+
+    #[test]
+    fn gate_model_comparison_aggregate_budget_scales_with_records_rows_and_outputs() {
+        let limits = ModelLabLimits {
+            max_comparison_cells: 1_000,
+            ..DEFAULT_LIMITS
+        };
+        // 2 records x 100 rows x (4 outputs + 1) = 1000 cells: exactly at the budget.
+        assert_eq!(
+            comparison_cells(&[(100, 4), (100, 4)], &limits).unwrap(),
+            1_000
+        );
+        // One more record, one more row, or one more output each exceeds it.
+        for request in [
+            vec![(100, 4), (100, 4), (1, 0)],
+            vec![(101, 4), (100, 4)],
+            vec![(100, 5), (100, 4)],
+        ] {
+            assert!(matches!(
+                comparison_cells(&request, &limits),
+                Err(ModelError::ResourceQuota(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_comparison_budget_refuses_large_and_overflowing_requests() {
+        // The largest request the record limits allow: 8 records x 5,000,000 rows x 16 outputs.
+        let largest = vec![(5_000_000u64, 16usize); MAX_COMPARED_RECORDS];
+        assert!(matches!(
+            comparison_cells(&largest, &DEFAULT_LIMITS),
+            Err(ModelError::ResourceQuota(_))
+        ));
+        assert!(matches!(
+            comparison_cells(&[(u64::MAX, 16), (u64::MAX, 16)], &DEFAULT_LIMITS),
+            Err(ModelError::ResourceQuota(_))
+        ));
+        assert!(matches!(
+            comparison_cells(
+                &[(u64::MAX / 2, 0), (u64::MAX / 2, 0), (2, 0)],
+                &DEFAULT_LIMITS
+            ),
+            Err(ModelError::ResourceQuota(_))
+        ));
+        // The default budget bounds resident comparison data to at most 256 MiB.
+        const {
+            assert!(
+                DEFAULT_LIMITS.max_comparison_cells * BYTES_PER_COMPARISON_CELL
+                    <= 256 * 1024 * 1024
+            )
+        };
+    }
 }

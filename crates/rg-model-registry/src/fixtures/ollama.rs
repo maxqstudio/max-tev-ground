@@ -58,6 +58,8 @@ struct MockState {
     behavior: MockBehavior,
     models: Vec<MockModel>,
     requests: Vec<String>,
+    /// After this many generations, every listed model reports the given digest.
+    digest_flip: Option<(u64, String)>,
 }
 
 pub struct MockOllama {
@@ -83,6 +85,7 @@ impl MockOllama {
                 digest: FIXTURE_DIGEST.into(),
             }],
             requests: Vec::new(),
+            digest_flip: None,
         }));
         let generations = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
@@ -130,6 +133,12 @@ impl MockOllama {
 
     pub fn set_models(&self, models: Vec<MockModel>) {
         self.state.lock().unwrap().models = models;
+    }
+
+    /// Makes the listing report `digest` for every model once `generations` have been served,
+    /// simulating a model tag replaced while a run is in progress.
+    pub fn flip_digest_after(&self, generations: u64, digest: &str) {
+        self.state.lock().unwrap().digest_flip = Some((generations, digest.into()));
     }
 
     /// `METHOD PATH` of every request received, in arrival order.
@@ -219,7 +228,15 @@ fn serve(
     let (behavior, models) = {
         let mut state = state.lock().unwrap();
         state.requests.push(format!("{method} {path}"));
-        (state.behavior.clone(), state.models.clone())
+        let mut models = state.models.clone();
+        if let Some((after, digest)) = &state.digest_flip {
+            if generations.load(Ordering::Relaxed) >= *after {
+                for model in &mut models {
+                    model.digest.clone_from(digest);
+                }
+            }
+        }
+        (state.behavior.clone(), models)
     };
     match behavior {
         MockBehavior::Redirect => {

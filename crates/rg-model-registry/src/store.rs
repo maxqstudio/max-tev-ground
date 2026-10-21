@@ -67,11 +67,17 @@ pub const DEFAULT_MAX_ONNX_BYTES: u64 = 256 * 1024 * 1024;
 pub struct ModelLabLimits {
     pub max_onnx_bytes: u64,
     pub onnx: OnnxLimits,
+    /// Aggregate cells one comparison may load: records x rows x (outputs + 1).
+    pub max_comparison_cells: u64,
+    /// Aggregate bytes of record outputs one comparison may copy.
+    pub max_comparison_copy_bytes: u64,
 }
 
 pub const DEFAULT_LIMITS: ModelLabLimits = ModelLabLimits {
     max_onnx_bytes: DEFAULT_MAX_ONNX_BYTES,
     onnx: DEFAULT_ONNX_LIMITS,
+    max_comparison_cells: 32 * 1024 * 1024,
+    max_comparison_copy_bytes: 2 * 1024 * 1024 * 1024,
 };
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1328,9 +1334,13 @@ impl ModelLabStore {
                 },
                 None,
             ) => {
+                let endpoint = self.ollama_endpoint()?;
                 let mut rows = OllamaRows {
-                    endpoint: self.ollama_endpoint()?,
+                    endpoint,
+                    model_id: &model.model_id,
                     model_name: &identity.model_name,
+                    registered_digest: &identity.content_digest,
+                    generations: 0,
                     settings: GenerationSettings {
                         seed: *seed,
                         max_output_tokens: *max_output_tokens,
@@ -1341,7 +1351,7 @@ impl ModelLabStore {
                     outputs: &identity.outputs,
                     timeout: Duration::from_millis(request.quotas.request_timeout_ms),
                 };
-                inference::materialize(
+                let materialized = inference::materialize(
                     plan,
                     &identity.outputs,
                     &mut rows,
@@ -1354,7 +1364,17 @@ impl ModelLabStore {
                     cancel,
                     progress,
                     &input.identity.id,
-                )?
+                )?;
+                // Ollama cannot pin a generation to content, so the digest is checked again after
+                // the run: output computed while the runtime served other content is discarded.
+                ollama::verify_registered_digest(
+                    &endpoint,
+                    &model.model_id,
+                    &identity.model_name,
+                    &identity.content_digest,
+                    "after inference",
+                )?;
+                materialized
             }
             _ => {
                 return Err(ModelError::InvalidPrepared(
@@ -1514,21 +1534,31 @@ impl ModelLabStore {
                 )?
             };
             match metadata {
+                // The live runtime is checked too: an Ollama digest that changed, or a runtime that
+                // cannot be reached, after preview blocks confirmation.
                 Some(metadata) => {
-                    let entry = self.verify_model(&metadata, None)?;
-                    entry.status == ModelStatus::Ready
+                    let entry = self.verify_model(&metadata, Some(&mut RuntimeCheck::default()))?;
+                    if entry.status == ModelStatus::Ready
                         && metadata.identity_sha256 == manifest.identity.model.identity_sha256
+                    {
+                        Ok(())
+                    } else {
+                        Err((entry.status, entry.diagnostic))
+                    }
                 }
-                None => false,
+                None => Err((ModelStatus::Quarantined, None)),
             }
         };
-        if !model_ok {
+        if let Err((status, diagnostic)) = model_ok {
             return Err(ModelError::ModelNotUsable {
                 model_id: manifest.identity.model.model_id.clone(),
-                status: "QUARANTINED".into(),
-                reason: Some(
-                    "model registration changed or failed verification after preview".into(),
-                ),
+                status: status.as_str().into(),
+                reason: Some(format!(
+                    "at confirmation, {}",
+                    diagnostic.unwrap_or_else(|| {
+                        "model registration changed or failed verification after preview".into()
+                    })
+                )),
             });
         }
         let existing = {

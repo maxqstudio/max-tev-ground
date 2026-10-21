@@ -135,6 +135,33 @@ Evidence and limits:
   - the deferred RG-R02 visual redesign;
   - manual GUI review NOT_TESTED for accepted phases.
 
+## RG-R04 audit repairs (PR #11)
+
+The [Control Room audit of PR #11](https://github.com/maxqstudio/max-tev-ground/pull/11#pullrequestreview-5594749914) on candidate `8b866f9e70b335a8ef28408f699621e9d3609616` (tree `c49e814ec7d7848bdf012067c4ec41024a375ffb`) returned `REPAIR_REQUIRED` for two P1 defects. Both are repaired on the same branch.
+
+- **P1: Ollama digest not re-verified across inference and confirmation.** Before the repair, the registered digest was checked only before the first generation, and confirmation skipped the live runtime check. Now:
+  - the digest is re-checked every 16 generations and after the last row;
+  - confirmation re-checks the live runtime;
+  - a mismatch fails as `QUARANTINED`, and an unreachable runtime as `RUNTIME_UNAVAILABLE`. The diagnostic names the check, the model ID and name, and both digests, and nothing is registered under the old identity.
+
+  Records confirmed before a later drift are not rewritten. Because Ollama returns no content digest with a generation, repeated checks cannot provide atomic pinning; this is documented in `SECURITY.md` and `CONTRACTS.md`. Regressions:
+  - `gate_adversarial_tamper_ollama_digest_flip_after_preview_refuses_confirmation`: a flip between preview and confirm is refused, and the earlier record stays `READY` and byte-identical.
+  - `gate_adversarial_tamper_ollama_digest_flip_mid_evaluation_fails_closed`: an early flip stops the run at the first checkpoint, after 16 of 53 generations; a late flip is caught by the after-run check.
+  - `gate_resource_cancel_recovery_ollama_runtime_unavailable_at_confirm_refuses`.
+- **P1: Comparison memory bounded per record, not in aggregate.** Before the repair, up to 8 records of up to 5,000,000 rows and 16 outputs could be loaded as boxed values with no total limit. Now:
+  - before any copy or allocation, an overflow-checked aggregate budget of records x rows x (outputs + 1) cells is enforced (default 32 Mi cells, at most 8 bytes each, so at most 256 MiB);
+  - a total copied-bytes budget is enforced (default 2 GiB);
+  - outputs are stored compactly (numbers, or one-byte label indexes), and decision times are compared by digest instead of being held;
+  - records are copied and loaded one at a time, and copies are removed on success, error, and cancellation.
+
+  Regressions:
+  - `gate_model_comparison_aggregate_budget_scales_with_records_rows_and_outputs` (exactly-at-limit and +1 record, row, or output);
+  - `gate_resource_cancel_recovery_comparison_budget_refuses_large_and_overflowing_requests` (8 x 5,000,000 x 16 and overflow);
+  - `gate_resource_cancel_recovery_comparison_budget_counts_records_rows_and_outputs_before_copying` (multi-output, near-quota, copy-byte budget, three records, no copies left);
+  - `gate_resource_cancel_recovery_cancelled_comparison_leaves_no_copies`.
+
+Scope is unchanged: no UI redesign, no RG-R05 work, and no Owner database change. The existing RG-R02 footer quota debt remains separate.
+
 ## Acceptance runner
 
 `RUN_ACCEPTANCE.ps1` is scoped to the RG-R04 candidate branch `work/rg-r04-model-registry` and to the governance-only activation branch `work/rg-r03-closure-rg-r04-activation`. It runs non-interactively from the authorized Windows root. It checks pinned Rust/Node toolchains, Windows prerequisites, roadmap synchronization, CI evidence contracts, Rust formatting/tests/lint/build, frontend lint/typecheck/tests/build, the phase gate-traceable tests, and the Tauri build when MSVC is available. It writes per-command logs and a checksummed report bound to the exact candidate SHA/tree. It never launches the desktop or reads, copies, or modifies the legacy research baseline.
