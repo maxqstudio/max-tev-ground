@@ -9,6 +9,10 @@
 //! output files together must fit [`ModelLabLimits::max_comparison_copy_bytes`]. Each loaded cell
 //! takes at most 8 bytes (a number, or a one-byte label index), and only one private copy exists
 //! at a time.
+//!
+//! Numeric statistics stay finite: the mean absolute difference is a running mean, bounded by the
+//! largest difference where a plain sum could overflow, and a pair of finite outputs whose
+//! difference exceeds the Float64 range refuses the comparison rather than report infinity.
 
 use std::{
     collections::BTreeSet,
@@ -247,7 +251,7 @@ impl ModelLabStore {
         let mut pairs = Vec::new();
         for left in 0..records.len() {
             for right in left + 1..records.len() {
-                pairs.push(compare_pair(&records[left], &records[right]));
+                pairs.push(compare_pair(&records[left], &records[right])?);
             }
         }
         let input = &records[0].manifest.identity.input;
@@ -360,7 +364,7 @@ fn integrity(manifest: &InferenceRecordManifest, reason: String) -> ModelError {
     }
 }
 
-fn compare_pair(left: &LoadedRecord, right: &LoadedRecord) -> PairComparison {
+fn compare_pair(left: &LoadedRecord, right: &LoadedRecord) -> Result<PairComparison, ModelError> {
     let mut fields = Vec::new();
     for (left_index, output) in left.manifest.outputs.iter().enumerate() {
         let Some(right_index) =
@@ -373,17 +377,24 @@ fn compare_pair(left: &LoadedRecord, right: &LoadedRecord) -> PairComparison {
         let right_output = &right.manifest.outputs[right_index];
         let mut both = 0u64;
         let mut agreeing = 0u64;
-        let mut difference_sum = 0.0f64;
+        let mut difference_mean = 0.0f64;
         let mut difference_max: Option<f64> = None;
         match (&left.values[left_index], &right.values[right_index]) {
             (StoredColumn::Numbers(l), StoredColumn::Numbers(r)) => {
-                for (l, r) in l.iter().zip(r) {
+                for (row, (l, r)) in l.iter().zip(r).enumerate() {
                     if l.is_nan() || r.is_nan() {
                         continue;
                     }
-                    both += 1;
                     let difference = (l - r).abs();
-                    difference_sum += difference;
+                    if !difference.is_finite() {
+                        return Err(ModelError::ComparisonRefused(format!(
+                            "output {}: the difference between {} and {} at row {row} ({l} vs {r}) exceeds the representable Float64 range",
+                            output.name, left.manifest.record_id, right.manifest.record_id
+                        )));
+                    }
+                    both += 1;
+                    // Both terms lie in [0, f64::MAX], so the update cannot overflow.
+                    difference_mean += (difference - difference_mean) / both as f64;
                     difference_max =
                         Some(difference_max.map_or(difference, |max| max.max(difference)));
                 }
@@ -423,15 +434,15 @@ fn compare_pair(left: &LoadedRecord, right: &LoadedRecord) -> PairComparison {
             } else {
                 None
             },
-            mean_absolute_difference: (!category && both > 0).then(|| difference_sum / both as f64),
+            mean_absolute_difference: (!category && both > 0).then_some(difference_mean),
             max_absolute_difference: if category { None } else { difference_max },
         });
     }
-    PairComparison {
+    Ok(PairComparison {
         left_record_id: left.manifest.record_id.clone(),
         right_record_id: right.manifest.record_id.clone(),
         fields,
-    }
+    })
 }
 
 fn same_kind(left: &OutputKind, right: &OutputKind) -> bool {

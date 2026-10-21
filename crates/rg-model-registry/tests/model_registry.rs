@@ -1720,3 +1720,82 @@ fn gate_resource_cancel_recovery_cancelled_comparison_leaves_no_copies() {
     ));
     assert_eq!(fixture.staging_entries(), 0);
 }
+
+/// Two READY Ollama records over the standard feature set whose `score` output is the given
+/// constant on every OK row. Bounds span nearly the whole finite Float64 range, which
+/// registration accepts.
+fn fixed_score_records(fixture: &Fixture, left: f64, right: f64) -> ComparisonRequest {
+    let feature_set = fixture.standard_feature_set();
+    let mock = MockOllama::start(MockBehavior::FixedOutput(left));
+    let outputs = vec![float_output("score", -1.0e308, 1.0e308)];
+    let first = fixture.register_ollama(&mock, 31, outputs.clone());
+    let second = fixture.register_ollama(&mock, 32, outputs);
+    let a = fixture.infer(&ollama_request(&first, &feature_set));
+    mock.set_behavior(MockBehavior::FixedOutput(right));
+    let b = fixture.infer(&ollama_request(&second, &feature_set));
+    ComparisonRequest {
+        record_ids: vec![a.record_id, b.record_id],
+    }
+}
+
+/// The serialized numeric metrics of every Float64 field are JSON numbers, never `null`.
+fn assert_numeric_metrics_serialize_as_numbers(
+    report: &rg_model_registry::compare::ComparisonReport,
+) {
+    let json = serde_json::to_value(report).unwrap();
+    for pair in json["pairs"].as_array().unwrap() {
+        for field in pair["fields"].as_array().unwrap() {
+            assert_eq!(field["kind"], "FLOAT64");
+            for metric in ["mean_absolute_difference", "max_absolute_difference"] {
+                assert!(
+                    field[metric].as_f64().is_some_and(f64::is_finite),
+                    "{metric} serialized as {}",
+                    field[metric]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn gate_model_comparison_refuses_opposite_extreme_values_whose_difference_overflows() {
+    let fixture = Fixture::new();
+    // Both values are valid and finite, but 1e308 - (-1e308) exceeds f64::MAX.
+    let request = fixed_score_records(&fixture, 1.0e308, -1.0e308);
+    match fixture.lab().compare(&request, &never()) {
+        Err(ModelError::ComparisonRefused(reason)) => {
+            assert!(reason.contains("score"), "{reason}");
+            assert!(reason.contains("representable"), "{reason}");
+        }
+        other => panic!("expected an explicit refusal, got {other:?}"),
+    }
+    assert_eq!(fixture.staging_entries(), 0);
+}
+
+#[test]
+fn gate_model_comparison_mean_stays_finite_when_the_sum_of_differences_overflows() {
+    let fixture = Fixture::new();
+    // Each difference is 1.5e308 (finite); 53 of them sum far past f64::MAX.
+    let request = fixed_score_records(&fixture, 1.0e308, -5.0e307);
+    let report = fixture.lab().compare(&request, &never()).unwrap();
+    let field = &report.pairs[0].fields[0];
+    assert_eq!(field.rows_both_ok, 53);
+    let difference = 1.0e308_f64 - -5.0e307_f64;
+    assert!(difference.is_finite() && difference * 53.0 == f64::INFINITY);
+    assert_eq!(field.max_absolute_difference, Some(difference));
+    assert_eq!(field.mean_absolute_difference, Some(difference));
+    assert_numeric_metrics_serialize_as_numbers(&report);
+}
+
+#[test]
+fn gate_model_comparison_ordinary_differences_are_unchanged() {
+    let fixture = Fixture::new();
+    let request = fixed_score_records(&fixture, 0.75, -0.5);
+    let report = fixture.lab().compare(&request, &never()).unwrap();
+    let field = &report.pairs[0].fields[0];
+    assert_eq!(field.rows_both_ok, 53);
+    assert_eq!(field.mean_absolute_difference, Some(1.25));
+    assert_eq!(field.max_absolute_difference, Some(1.25));
+    assert!(field.agreement_rate.is_none());
+    assert_numeric_metrics_serialize_as_numbers(&report);
+}

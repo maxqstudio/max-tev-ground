@@ -33,6 +33,8 @@ pub enum MockBehavior {
     UnknownOutputField,
     /// Generations return a numeric output outside the declared bounds.
     OutOfRangeOutput,
+    /// Every numeric output is the given value.
+    FixedOutput(f64),
     /// The listing omits digests.
     MalformedListing,
     Redirect,
@@ -387,6 +389,9 @@ fn generation_text(request: &Value, behavior: &MockBehavior, count: u64) -> Stri
             }
             if *behavior == MockBehavior::OutOfRangeOutput {
                 value = 1.0e6;
+            }
+            if let MockBehavior::FixedOutput(fixed) = behavior {
+                value = *fixed;
             }
             json!(value)
         };

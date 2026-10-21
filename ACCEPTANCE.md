@@ -160,6 +160,17 @@ The [Control Room audit of PR #11](https://github.com/maxqstudio/max-tev-ground/
   - `gate_resource_cancel_recovery_comparison_budget_counts_records_rows_and_outputs_before_copying` (multi-output, near-quota, copy-byte budget, three records, no copies left);
   - `gate_resource_cancel_recovery_cancelled_comparison_leaves_no_copies`.
 
+The [re-audit of `06de21a3b23a32f78512a2cbe9a3b2c4cb7aee05`](https://github.com/maxqstudio/max-tev-ground/pull/11#pullrequestreview-5595167374) verified both P1 repairs and found one new P2 defect, repaired on the same branch.
+
+- **P2: Comparison Float64 statistics could overflow.** Registration accepts finite bounds such as `[-1e308, 1e308]`. Before the repair, two valid outputs `1e308` and `-1e308` gave an infinite difference, and many finite differences could make the summed mean infinite; either was reported as `inf` (serialized as `null`). Now:
+  - a pairwise difference outside the Float64 range refuses the comparison with `COMPARISON_REFUSED`, naming the output, both records, the row, and both values;
+  - the mean is a running mean, bounded by the largest difference, so it cannot overflow where a sum would.
+
+  Regressions, through real Ollama-mock records:
+  - `gate_model_comparison_refuses_opposite_extreme_values_whose_difference_overflows`;
+  - `gate_model_comparison_mean_stays_finite_when_the_sum_of_differences_overflows` (53 differences of 1.5e308; the serialized mean and maximum are finite JSON numbers);
+  - `gate_model_comparison_ordinary_differences_are_unchanged` (exact 1.25), alongside the unchanged hand-calculated golden `gate_model_comparison_reports_hand_calculated_coverage_and_differences`.
+
 Scope is unchanged: no UI redesign, no RG-R05 work, and no Owner database change. The existing RG-R02 footer quota debt remains separate.
 
 ## Acceptance runner
