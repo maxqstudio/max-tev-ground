@@ -92,6 +92,10 @@ impl StrategyStudioState {
         })
     }
 
+    pub fn store(&self) -> Arc<StrategyStore> {
+        Arc::clone(&self.store)
+    }
+
     fn guard<'a, T>(mutex: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, String> {
         mutex.lock().map_err(|_| UNAVAILABLE.to_owned())
     }

@@ -1,5 +1,6 @@
 mod data_ground_commands;
 mod feature_studio_commands;
+mod model_lab_commands;
 mod strategy_studio_commands;
 
 use tauri::Manager;
@@ -45,7 +46,27 @@ fn register_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Bu
         strategy_studio_commands::cancel_decision_job,
         strategy_studio_commands::list_decision_sets,
         strategy_studio_commands::inspect_decision_set,
-        strategy_studio_commands::list_decision_attempts
+        strategy_studio_commands::list_decision_attempts,
+        model_lab_commands::get_model_lab_registry,
+        model_lab_commands::get_ollama_endpoint,
+        model_lab_commands::set_ollama_endpoint,
+        model_lab_commands::discover_ollama_models,
+        model_lab_commands::select_onnx_model,
+        model_lab_commands::list_onnx_candidates,
+        model_lab_commands::discard_onnx_candidate,
+        model_lab_commands::preview_model_registration,
+        model_lab_commands::register_model,
+        model_lab_commands::list_models,
+        model_lab_commands::inspect_model,
+        model_lab_commands::list_inference_inputs,
+        model_lab_commands::preview_inference,
+        model_lab_commands::get_active_inference_job,
+        model_lab_commands::confirm_inference,
+        model_lab_commands::cancel_inference_job,
+        model_lab_commands::list_inference_records,
+        model_lab_commands::inspect_inference_record,
+        model_lab_commands::compare_inference_records,
+        model_lab_commands::list_model_lab_attempts
     ])
 }
 
@@ -63,9 +84,12 @@ pub fn run() {
                 &data_directory,
                 feature_studio.store(),
             )?;
+            let model_lab =
+                model_lab_commands::ModelLabState::open(&data_directory, strategy_studio.store())?;
             app.manage(data_ground);
             app.manage(feature_studio);
             app.manage(strategy_studio);
+            app.manage(model_lab);
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -107,8 +131,8 @@ mod tests {
 
         assert_eq!(response["current_phase"], "RG-R04");
         assert_eq!(response["phase_lifecycle"], "ACTIVE");
-        assert_eq!(response["builder_status"], "NOT_STARTED");
-        assert_eq!(response["automated_status"], "NOT_RUN");
+        assert_eq!(response["builder_status"], "IMPLEMENTED");
+        assert_eq!(response["automated_status"], "AUTOMATED_PASS");
         assert_eq!(response["owner_ui_status"], "PENDING");
         assert_eq!(response["owner_acceptance"], "PENDING");
         assert_eq!(response["pages"].as_array().unwrap().len(), 8);
@@ -137,7 +161,7 @@ mod tests {
         assert_eq!(response["pages"][1]["status"], "OWNER_ACCEPTED");
         assert_eq!(response["pages"][2]["status"], "OWNER_ACCEPTED");
         assert_eq!(response["pages"][3]["status"], "OWNER_ACCEPTED");
-        assert_eq!(response["pages"][4]["status"], "ACTIVE_NOT_STARTED");
+        assert_eq!(response["pages"][4]["status"], "IN_PROGRESS");
         assert_eq!(response["pages"][5]["status"], "PLANNED");
         assert!(!response["next_phase_unlocked"].as_bool().unwrap());
     }
@@ -148,11 +172,11 @@ mod tests {
         assert_eq!(response.current_phase, "RG-R04");
         assert_eq!(
             response.builder_status,
-            rg_governance::BuilderStatus::NotStarted
+            rg_governance::BuilderStatus::Implemented
         );
         assert_eq!(
             response.automated_status,
-            rg_governance::AutomatedStatus::NotRun
+            rg_governance::AutomatedStatus::AutomatedPass
         );
         assert_eq!(
             response.owner_ui_status,

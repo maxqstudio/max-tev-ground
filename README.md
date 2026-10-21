@@ -1,6 +1,6 @@
 # MAX Research Ground
 
-Rust-first, local-first foundation for reproducible trading research. **RG-R01 Data Ground, RG-R02 Feature Studio, and RG-R03 Deterministic Strategy Engine are Owner accepted with manual UI review waived, not tested. RG-R04 Ollama and ONNX Model Registry is the active scope, but its implementation has not started.** RG-R05–RG-R08 remain planned. This repository does not establish that a trading edge exists and does not execute trades.
+Rust-first, local-first foundation for reproducible trading research. **RG-R01 Data Ground, RG-R02 Feature Studio, and RG-R03 Deterministic Strategy Engine are Owner accepted with manual UI review waived, not tested. RG-R04 Ollama and ONNX Model Registry is the active scope: its implementation is submitted for Control Room audit and is not Owner accepted.** RG-R05–RG-R08 remain planned. This repository does not establish that a trading edge exists and does not execute trades.
 
 ## Build and acceptance
 
@@ -23,9 +23,9 @@ Run `.\INSTALL_DESKTOP_SHORTCUT.ps1` once to create a Windows desktop shortcut, 
 
 `-WhatIf` previews the launch path without opening the GUI. Do not use the desktop launch as a substitute for the acceptance runner.
 
-### Upgrade warning: database schema 7
+### Upgrade warning: database schema 8
 
-A build that includes RG-R03 upgrades an existing research database from schema 6 to 7 on its first start, and builds that only know schema 6 cannot open the upgraded store. Before the upgrade, the application writes a verified backup to `schema-backups\` beside the database (`%APPDATA%\com.max.research-ground\` for the desktop app). If that backup fails, the store is left at schema 6 and the application does not start. To return to a schema 6 build, close the application, then:
+A build that includes RG-R04 upgrades an existing research database to schema 8 on its first start: from schema 7 (RG-R03), or from schema 6 (RG-R02). Builds that only know an older schema cannot open the upgraded store. Before the upgrade, the application writes a verified backup to `schema-backups\` beside the database (`%APPDATA%\com.max.research-ground\` for the desktop app). If that backup fails, the store is left at its version and the application does not start. To return to an older build, close the application, then:
 
 ```powershell
 .\RESTORE_DATABASE_BACKUP.ps1                       # lists the backups
@@ -64,9 +64,17 @@ The Strategy Studio page selects a feature set, a strategy, role bindings, and p
 
 Owner acceptance of RG-R03 is bound to `main` merge `3d3ceeb34958130f1e3f67309d0a213d10c971c3`, tree `4e8f1542a1d6a3872219c1dad9747dde5841bd88` (identical to accepted candidate `277c85f90a36b96c67ff59cdff935b2b41e8175f`), and exact-main CI [run #39453334794](https://github.com/maxqstudio/max-tev-ground/actions/runs/39453334794). Only headless component and IPC tests have run: manual desktop click-through was **NOT_RUN; UI review waived, not tested**. All tests use labeled synthetic fixtures, so real-market performance and any edge are not proven. The acceptance does **not** authorize upgrading the Owner's existing research database to schema 7 (see the upgrade warning above).
 
-## RG-R04 Ollama and ONNX Model Registry (active, not started)
+## RG-R04 Ollama and ONNX Model Registry (active, submitted for audit)
 
-RG-R04 is authorized, but no model code exists yet. Its thirteen acceptance gates are frozen in `PHASE_MANIFEST.yaml` before implementation, and all of them remain `NOT_RUN`. The Model Lab page states that implementation has not started. RG-R04 will register local Ollama and ONNX models by immutable identity and record advisory research outputs over verified feature and decision sets. It will not download models, call remote endpoints, change strategy decisions, place orders, or claim an edge.
+The `rg-model-registry` crate registers local research models by immutable identity and records their `ADVISORY_ONLY` outputs over verified RG-R02 feature sets and RG-R03 decision sets. Two adapters exist:
+- **Ollama (loopback).** Models already installed in an Ollama runtime are reached only at an Owner-configured loopback address, by default `http://127.0.0.1:11434`. Host names and remote addresses are refused. The client can only list models and generate answers; it never pulls, creates, copies, or deletes a model, and it never follows a redirect. Decoding is fixed at temperature 0 with a seed and a JSON-schema answer format.
+- **ONNX (native).** A selected `.onnx` file is copied into application storage and run by a built-in, bounded interpreter for a documented subset of operators. Models outside that subset, or with external data, are refused with a diagnostic.
+
+Discovery lists candidates without registering anything. A model is registered only after its identity has been previewed and confirmed. The identity binds the adapter, model name, content digest, input and output schema, and runtime settings. If a registered ONNX file changes, or the runtime reports a different digest, the model is quarantined; an unreachable runtime is shown as unavailable, never as model output.
+
+Inference binds each model input to one column of a `READY` feature or decision set and reads only that row's values. No timestamp or symbol reaches the model. Inputs that are not ready are skipped, and answers outside the declared schema are recorded as invalid. Records are staged, confirmed, and promoted through a crash-recoverable journal. Replaying a record either reproduces its output digest or is recorded as non-deterministic; the stored record is never overwritten. A comparison of records over the same input reports only coverage, invalid-output rate, agreement, numeric differences, and latency.
+
+The Model Lab page covers the runtime endpoint, discovery and ONNX selection, registration, the model catalogue, inference preview and confirmation with progress and cancellation, the record catalogue with lineage, comparison, and attempt history. Only headless component and IPC tests have run: manual desktop click-through is **NOT_RUN**, and Owner UI acceptance is pending. All tests use labeled synthetic fixture models and a loopback mock runtime, so no real model's quality, and no trading edge, is shown. Running this build against the Owner's existing research database would upgrade it to schema 8; that is **not authorized** (see the upgrade warning above).
 
 Synthetic repository fixtures are parser and deterministic test inputs only; they are not market evidence or proof of trading performance. Historical data remains on the user's machine; the importer does not upload market data. An importer for the legacy research store is deferred. The MT5 bridge is not implemented. No phase opens a terminal, reads MT5 `Common\Files`, or accesses account or order APIs. Feature sets and decision sets are research records, not trading signals, orders, backtests, or evidence of edge. No live trading or automatic Champion promotion is part of any phase so far.
 

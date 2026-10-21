@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import DataGround from "./DataGround";
 import FeatureStudio from "./FeatureStudio";
+import ModelLab from "./ModelLab";
 import StrategyStudio from "./StrategyStudio";
 import type { FoundationSnapshot } from "./types";
 
@@ -163,6 +164,8 @@ export default function App() {
           <FeatureStudio />
         ) : activePage === "strategy-studio" ? (
           <StrategyStudio />
+        ) : activePage === "model-lab" ? (
+          <ModelLab />
         ) : (
           <PlannedPage
             label={currentPage.label}

@@ -1,21 +1,21 @@
 schema_version: 3
 current_phase: RG-R04
-builder_status: NOT_STARTED
-automated_status: NOT_RUN
+builder_status: IMPLEMENTED
+automated_status: AUTOMATED_PASS
 owner_ui_status: PENDING
 owner_acceptance: PENDING
 next_phase_unlocked: false
 deliverables:
-  local_runtime_boundary: PLANNED
-  model_discovery: PLANNED
-  model_identity_registry: PLANNED
-  runtime_adapters: PLANNED
-  verified_model_input: PLANNED
-  immutable_inference_records: PLANNED
-  model_comparison: PLANNED
-  resource_controls: PLANNED
-  model_lab_ui: PLANNED
-  acceptance_evidence: PLANNED
+  local_runtime_boundary: TESTED
+  model_discovery: TESTED
+  model_identity_registry: TESTED
+  runtime_adapters: TESTED
+  verified_model_input: TESTED
+  immutable_inference_records: TESTED
+  model_comparison: TESTED
+  resource_controls: TESTED
+  model_lab_ui: TESTED
+  acceptance_evidence: TESTED
 accepted_phases:
   - phase: RG-R00
     owner_acceptance: OWNER_ACCEPTED
