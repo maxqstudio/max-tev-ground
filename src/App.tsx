@@ -62,6 +62,13 @@ const deliverableLabels: Record<string, string> = {
   immutable_inference_records: "Immutable inference records",
   model_comparison: "Model comparison",
   model_lab_ui: "Model Lab UI",
+  verified_policy_input: "Verified policy input",
+  typed_policy_dsl: "Typed policy DSL",
+  policy_evaluator: "Policy evaluator",
+  visual_policy_builder: "Visual policy builder",
+  extension_sandbox: "Extension sandbox",
+  immutable_policy_decision_sets: "Immutable policy decision sets",
+  policy_studio_ui: "Policy Studio UI",
 };
 
 function statusLabel(value: string): string {

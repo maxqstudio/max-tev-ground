@@ -1,6 +1,6 @@
 # MAX Research Ground
 
-Rust-first, local-first foundation for reproducible trading research. **RG-R01 Data Ground, RG-R02 Feature Studio, and RG-R03 Deterministic Strategy Engine are Owner accepted with manual UI review waived, not tested. RG-R04 Ollama and ONNX Model Registry is the active scope: its implementation is submitted for Control Room audit and is not Owner accepted.** RG-R05–RG-R08 remain planned. This repository does not establish that a trading edge exists and does not execute trades.
+Rust-first, local-first foundation for reproducible trading research. **RG-R01 Data Ground, RG-R02 Feature Studio, RG-R03 Deterministic Strategy Engine, and RG-R04 Ollama and ONNX Model Registry are Owner accepted with manual UI review waived, not tested. RG-R05 Policy DSL and Extensibility is the active scope, but its implementation has not started.** RG-R06–RG-R08 remain planned. This repository does not establish that a trading edge exists and does not execute trades.
 
 ## Build and acceptance
 
@@ -11,7 +11,7 @@ Requirements: Node.js 24.19.0, npm 11.17.0, Rust 1.99.1, Windows C++ Build Tools
 .\RUN_ACCEPTANCE.ps1
 ```
 
-`RUN_ACCEPTANCE.ps1` is the RG-R04 acceptance runner. It requires a clean commit on `work/rg-r04-model-registry` or on the governance-only branch `work/rg-r03-closure-rg-r04-activation`. Besides the workspace, frontend, and Tauri checks, it runs `scripts/Invoke-PhaseGateTests.ps1`, which executes the tests named after each `PHASE_MANIFEST.yaml` gate and fails any gate with zero matching tests. GitHub CI runs the same gate step, so a gate passes only on its own tests, never on a generic suite result. (While a phase records `builder_status: NOT_STARTED`, the step runs no gate tests and reports every gate `NOT_RUN`.)
+`RUN_ACCEPTANCE.ps1` is the RG-R05 acceptance runner. It requires a clean commit on `work/rg-r05-policy-dsl` or on the governance-only branch `work/rg-r04-closure-rg-r05-activation`. Besides the workspace, frontend, and Tauri checks, it runs `scripts/Invoke-PhaseGateTests.ps1`, which executes the tests named after each `PHASE_MANIFEST.yaml` gate and fails any gate with zero matching tests. GitHub CI runs the same gate step, so a gate passes only on its own tests, never on a generic suite result. (While a phase records `builder_status: NOT_STARTED`, the step runs no gate tests and reports every gate `NOT_RUN`.)
 
 ## Open the desktop app
 
@@ -64,7 +64,7 @@ The Strategy Studio page selects a feature set, a strategy, role bindings, and p
 
 Owner acceptance of RG-R03 is bound to `main` merge `3d3ceeb34958130f1e3f67309d0a213d10c971c3`, tree `4e8f1542a1d6a3872219c1dad9747dde5841bd88` (identical to accepted candidate `277c85f90a36b96c67ff59cdff935b2b41e8175f`), and exact-main CI [run #39453334794](https://github.com/maxqstudio/max-tev-ground/actions/runs/39453334794). Only headless component and IPC tests have run: manual desktop click-through was **NOT_RUN; UI review waived, not tested**. All tests use labeled synthetic fixtures, so real-market performance and any edge are not proven. The acceptance does **not** authorize upgrading the Owner's existing research database to schema 7 (see the upgrade warning above).
 
-## RG-R04 Ollama and ONNX Model Registry (active, submitted for audit)
+## RG-R04 Ollama and ONNX Model Registry (accepted)
 
 The `rg-model-registry` crate registers local research models by immutable identity and records their `ADVISORY_ONLY` outputs over verified RG-R02 feature sets and RG-R03 decision sets. Two adapters exist:
 - **Ollama (loopback).** Models already installed in an Ollama runtime are reached only at an Owner-configured loopback address, by default `http://127.0.0.1:11434`. Host names and remote addresses are refused. The client can only list models and generate answers; it never pulls, creates, copies, or deletes a model, and it never follows a redirect. Decoding is fixed at temperature 0 with a seed and a JSON-schema answer format.
@@ -74,7 +74,13 @@ Discovery lists candidates without registering anything. A model is registered o
 
 Inference binds each model input to one column of a `READY` feature or decision set and reads only that row's values. No timestamp or symbol reaches the model. Inputs that are not ready are skipped, and answers outside the declared schema are recorded as invalid. Records are staged, confirmed, and promoted through a crash-recoverable journal. Replaying a record either reproduces its output digest or is recorded as non-deterministic; the stored record is never overwritten. A comparison of records over the same input reports only coverage, invalid-output rate, agreement, numeric differences, and latency.
 
-The Model Lab page covers the runtime endpoint, discovery and ONNX selection, registration, the model catalogue, inference preview and confirmation with progress and cancellation, the record catalogue with lineage, comparison, and attempt history. Only headless component and IPC tests have run: manual desktop click-through is **NOT_RUN**, and Owner UI acceptance is pending. All tests use labeled synthetic fixture models and a loopback mock runtime, so no real model's quality, and no trading edge, is shown. Running this build against the Owner's existing research database would upgrade it to schema 8; that is **not authorized** (see the upgrade warning above).
+The Model Lab page covers the runtime endpoint, discovery and ONNX selection, registration, the model catalogue, inference preview and confirmation with progress and cancellation, the record catalogue with lineage, comparison, and attempt history.
+
+Owner acceptance of RG-R04 is bound to `main` merge `c15af86d6998a4dd757f780fdcb02eeee8847d5d`, tree `3f64b150fa4625eac786def6fb65655c806b3730` (identical to accepted candidate `4e70e12932a8aea2f656bdea3e0747ac41185b67`), and exact-main CI [run #39557686462](https://github.com/maxqstudio/max-tev-ground/actions/runs/39557686462). Only headless component and IPC tests have run: manual desktop click-through of Model Lab was **NOT_RUN; UI review waived, not tested**. All tests use labeled synthetic fixture models and a loopback mock runtime, so no real model's quality, and no trading edge, is shown; outputs remain `ADVISORY_ONLY`. The acceptance does **not** authorize upgrading the Owner's existing research database to schema 8 (see the upgrade warning above).
+
+## RG-R05 Policy DSL and Extensibility (active, not started)
+
+RG-R05 is authorized as the active phase, but no policy code exists yet, and starting its implementation needs a separate Owner authorization. Its thirteen acceptance gates are frozen in `PHASE_MANIFEST.yaml` before implementation; the eleven implementation gates remain `NOT_RUN` and Owner UI acceptance is pending. The Policy Studio page states that implementation has not started. RG-R05 is scoped to a typed policy language, a visual policy builder that edits the same policy model, and isolated extensions, all producing research decision records over feature sets, decision sets, and inference records that share one verified feature-set lineage. Model outputs stay `ADVISORY_ONLY`; a policy may use them only to veto a deterministic decision to SKIP or to produce a labeled, model-origin research signal. It will not emit or route orders, size positions, contact a broker or MT5, promote a Champion, or claim an edge.
 
 Synthetic repository fixtures are parser and deterministic test inputs only; they are not market evidence or proof of trading performance. Historical data remains on the user's machine; the importer does not upload market data. An importer for the legacy research store is deferred. The MT5 bridge is not implemented. No phase opens a terminal, reads MT5 `Common\Files`, or accesses account or order APIs. Feature sets and decision sets are research records, not trading signals, orders, backtests, or evidence of edge. No live trading or automatic Champion promotion is part of any phase so far.
 
