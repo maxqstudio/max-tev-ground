@@ -963,6 +963,48 @@ mod tests {
     }
 
     #[test]
+    fn rg_r05_contract_closes_model_roles_and_binds_inputs_by_lineage() {
+        let phase: PhaseManifest = serde_yaml_ng::from_str(PHASE_SOURCE).unwrap();
+        let gate = |id: &str| {
+            let gate = phase
+                .acceptance_gates
+                .iter()
+                .find(|gate| gate.id == id)
+                .unwrap();
+            format!("{} {}", gate.requirement, gate.evidence)
+        };
+        let authority = gate("policy_authority_boundary");
+        for term in [
+            "ADVISORY_ONLY",
+            "closed, versioned",
+            "FILTER_VETO",
+            "INDEPENDENT_RESEARCH_SIGNAL",
+            "explicitly declared but disallowed",
+            "DECISION_OVERRIDE",
+            "POSITION_SIZING",
+            "ORDER_GENERATION",
+            "CHAMPION_PROMOTION",
+        ] {
+            assert!(
+                authority.contains(term),
+                "policy_authority_boundary lacks {term}"
+            );
+        }
+        let input = gate("policy_input_authority");
+        for term in [
+            "common lineage root",
+            "never compared as if interchangeable",
+            "diverging ancestry",
+            "different feature set",
+            "row-order mismatch",
+        ] {
+            assert!(input.contains(term), "policy_input_authority lacks {term}");
+        }
+        assert!(gate("causal_no_lookahead").contains("generation time"));
+        assert!(gate("policy_decision_semantics").contains("INVALID_OUTPUT"));
+    }
+
+    #[test]
     fn accepted_history_requires_owner_issue_sha_and_ci_evidence() {
         let changed = IMPLEMENTATION_SOURCE.replace(
             "source_sha: a1f7ada003d57a26dcd4dfa41e86ba62a5890bed",
