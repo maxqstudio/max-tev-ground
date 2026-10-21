@@ -1,6 +1,6 @@
 # MAX Research Ground roadmap
 
-Generated from ROADMAP.yaml. Current active phase: RG-R04. Later phases stay locked until the Owner accepts the current checkpoint and authorizes progression.
+Generated from ROADMAP.yaml. Current active phase: RG-R05. Later phases stay locked until the Owner accepts the current checkpoint and authorizes progression.
 
 ## RG-R00 — Rust foundation, Tauri shell, governance, CI (ACCEPTED)
 
@@ -26,11 +26,13 @@ Add deterministic native Rust strategies and isolated strategy contracts.
 
 Acceptance evidence: Owner acceptance WITH_UI_REVIEW_WAIVED: https://github.com/maxqstudio/max-tev-ground/issues/7#issuecomment-6295197683; manual desktop click-through NOT_RUN, the Owner accepted the deliverable without manual UI review: waived, not tested; source SHA 3d3ceeb34958130f1e3f67309d0a213d10c971c3 (PR #9 merge); source tree SHA 4e8f1542a1d6a3872219c1dad9747dde5841bd88, identical to accepted candidate 277c85f90a36b96c67ff59cdff935b2b41e8175f; exact-main CI SUCCESS https://github.com/maxqstudio/max-tev-ground/actions/runs/39453334794; acceptance artifact research-ground-evidence-39453334794-1 digest sha256:d20645f018bff44982a38c6197b4bb5125cd071661058972e1a6fda7c5ac6d3b; candidate push CI https://github.com/maxqstudio/max-tev-ground/actions/runs/39446641385 and PR CI https://github.com/maxqstudio/max-tev-ground/actions/runs/39446648817 SUCCESS with 10 of 10 automated gates; synthetic fixtures only, real-market evaluation, profitability, PnL, OOS evidence and trading edge NOT_PROVEN; schema 6 to 7 upgrade of the Owner research database NOT AUTHORIZED and not run against Owner data; RG-R02 feature-output quota debt, deferred visual UX redesign and RG-R01 cancelPreview cancel-to-refresh UX debt are carried forward.
 
-## RG-R04 — Ollama and ONNX Model Registry (ACTIVE)
+## RG-R04 — Ollama and ONNX Model Registry (ACCEPTED)
 
 Add model discovery, immutable identity, runtime adapters, and model comparison.
 
-## RG-R05 — Policy DSL and Extensibility (PLANNED)
+Acceptance evidence: Owner acceptance WITH_UI_REVIEW_WAIVED: https://github.com/maxqstudio/max-tev-ground/pull/11#issuecomment-6309913749; manual desktop click-through of Model Lab NOT_RUN, the Owner accepted the deliverable and authorized the merge without manual UI execution: waived, not tested; final Control Room re-audit https://github.com/maxqstudio/max-tev-ground/pull/11#pullrequestreview-5595721610 verified two P1 repairs (Ollama digest re-verification, aggregate comparison resource bound) and one P2 repair (finite Float64 comparison statistics); source SHA c15af86d6998a4dd757f780fdcb02eeee8847d5d (PR #11 merge); source tree SHA 3f64b150fa4625eac786def6fb65655c806b3730, identical to accepted candidate 4e70e12932a8aea2f656bdea3e0747ac41185b67; exact-main CI SUCCESS https://github.com/maxqstudio/max-tev-ground/actions/runs/39557686462; acceptance artifact research-ground-evidence-39557686462-1 digest sha256:325502b8c19d1cc91c25b96bc0518ff9cefcb5cd2432e36d9c1c8d438a078f8b; candidate push CI https://github.com/maxqstudio/max-tev-ground/actions/runs/39552047067 and PR CI https://github.com/maxqstudio/max-tev-ground/actions/runs/39552052945 SUCCESS with 11 of 11 automated gates; synthetic fixture models and a loopback mock Ollama runtime only, outputs ADVISORY_ONLY, real model quality, real-market evaluation, profitability, PnL, OOS evidence and trading edge NOT_PROVEN; schema 8 upgrade of the Owner research database NOT AUTHORIZED and not run against Owner data; RG-R02 feature-output quota debt, deferred visual UX redesign and RG-R01 cancelPreview cancel-to-refresh UX debt are carried forward.
+
+## RG-R05 — Policy DSL and Extensibility (ACTIVE)
 
 Add a typed policy DSL, visual policy builder, and isolated extensibility.
 

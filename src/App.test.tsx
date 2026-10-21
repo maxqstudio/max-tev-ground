@@ -8,32 +8,31 @@ import type { ActiveImportState, DatasetCatalogEntry, DatasetCatalogProgress, Im
 
 const fixtureSnapshot: FoundationSnapshot = {
   project: "MAX Research Ground",
-  current_phase: "RG-R04",
+  current_phase: "RG-R05",
   phase_lifecycle: "ACTIVE",
-  builder_status: "IMPLEMENTED",
-  automated_status: "AUTOMATED_PASS",
+  builder_status: "NOT_STARTED",
+  automated_status: "NOT_RUN",
   owner_ui_status: "PENDING",
   owner_acceptance: "PENDING",
   next_phase_unlocked: false,
   deliverables: {
-    local_runtime_boundary: "TESTED",
-    model_discovery: "TESTED",
-    model_identity_registry: "TESTED",
-    runtime_adapters: "TESTED",
-    verified_model_input: "TESTED",
-    immutable_inference_records: "TESTED",
-    model_comparison: "TESTED",
-    resource_controls: "TESTED",
-    model_lab_ui: "TESTED",
-    acceptance_evidence: "TESTED",
+    verified_policy_input: "PLANNED",
+    typed_policy_dsl: "PLANNED",
+    policy_evaluator: "PLANNED",
+    visual_policy_builder: "PLANNED",
+    extension_sandbox: "PLANNED",
+    immutable_policy_decision_sets: "PLANNED",
+    resource_controls: "PLANNED",
+    policy_studio_ui: "PLANNED",
+    acceptance_evidence: "PLANNED",
   },
   pages: [
     { id: "overview", status: "IMPLEMENTED" },
     { id: "data-ground", status: "OWNER_ACCEPTED" },
     { id: "feature-studio", status: "OWNER_ACCEPTED" },
     { id: "strategy-studio", status: "OWNER_ACCEPTED" },
-    { id: "model-lab", status: "IN_PROGRESS" },
-    { id: "policy-studio", status: "PLANNED" },
+    { id: "model-lab", status: "OWNER_ACCEPTED" },
+    { id: "policy-studio", status: "ACTIVE_NOT_STARTED" },
     { id: "experiments", status: "PLANNED" },
     { id: "results", status: "PLANNED" },
   ],
@@ -80,6 +79,22 @@ const fixtureSnapshot: FoundationSnapshot = {
       known_debts: [
         "Manual desktop click-through of Strategy Studio was NOT_RUN; the Owner accepted the deliverable without manual UI review (UI_REVIEW_WAIVED), so interactive use remains unverified.",
         "The RG-R03 build upgrades an existing research database from schema 6 to 7 on first start; no Owner-profile runtime test exists, and upgrading the Owner's research.sqlite3 is NOT AUTHORIZED by this acceptance.",
+        "RG-R02 maintenance debt: the Feature Studio feature-output quota is checked before the Parquet footer is written; recorded on Issue #4 for an Owner-approved targeted repair and unresolved.",
+      ],
+    },
+    {
+      phase: "RG-R04",
+      owner_acceptance: "OWNER_ACCEPTED",
+      owner_ui_status: "OWNER_ACCEPTED_WITH_UI_REVIEW_WAIVED",
+      source_sha: "c15af86d6998a4dd757f780fdcb02eeee8847d5d",
+      source_tree_sha: "3f64b150fa4625eac786def6fb65655c806b3730",
+      ci_run_url: "https://github.com/maxqstudio/max-tev-ground/actions/runs/39557686462",
+      owner_issue_url: "https://github.com/maxqstudio/max-tev-ground/pull/11#issuecomment-6309913749",
+      known_debts: [
+        "Manual desktop click-through of Model Lab was NOT_RUN; the Owner accepted the deliverable and authorized the merge without manual UI execution (UI_REVIEW_WAIVED), so interactive use remains unverified.",
+        "The RG-R04 build upgrades an existing research database to schema 8 (from 7 or 6) on first start; no Owner-profile runtime test exists, and upgrading the Owner's research.sqlite3 is NOT AUTHORIZED by this acceptance.",
+        "RG-R04 evidence is synthetic and headless: labeled fixture ONNX models and a loopback mock Ollama runtime, no live runtime or real model; outputs stay ADVISORY_ONLY, and model quality, accuracy, and trading edge are NOT_PROVEN.",
+        "Residual limit: Ollama returns no content digest with a generation, so the registered digest is re-checked every 16 generations, after the run, and at confirmation, but cannot be pinned atomically; a change and revert between checks is not observable.",
         "RG-R02 maintenance debt: the Feature Studio feature-output quota is checked before the Parquet footer is written; recorded on Issue #4 for an Owner-approved targeted repair and unresolved.",
       ],
     },
@@ -154,18 +169,20 @@ describe("desktop shell navigation", () => {
   it("loads the governance snapshot through the Tauri IPC boundary", async () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "MAX Research Ground" })).toBeTruthy();
-    expect(screen.getByText("Builder status").nextElementSibling?.textContent).toBe("IMPLEMENTED");
-    expect(screen.getByText("Automated gates").nextElementSibling?.textContent).toBe("AUTOMATED PASS");
+    expect(screen.getByText("Builder status").nextElementSibling?.textContent).toBe("NOT STARTED");
+    expect(screen.getByText("Automated gates").nextElementSibling?.textContent).toBe("NOT RUN");
     expect(screen.getByText("Owner UI review").nextElementSibling?.textContent).toBe("PENDING");
     expect(screen.getAllByText("LOCKED")).toHaveLength(2);
-    expect(screen.getByText("Model identity registry")).toBeTruthy();
+    expect(screen.getByText("Typed policy DSL")).toBeTruthy();
     expect(screen.getByText(/RG-R02: Owner accepted\. UI review waived, not tested\./)).toBeTruthy();
     expect(screen.getByText(/RG-R03: Owner accepted\. UI review waived, not tested\./)).toBeTruthy();
+    expect(screen.getByText(/RG-R04: Owner accepted\. UI review waived, not tested\./)).toBeTruthy();
     expect(screen.getByText(/visual redesign is deferred, not accepted or waived/)).toBeTruthy();
-    expect(screen.getByText(/research\.sqlite3 is NOT AUTHORIZED/)).toBeTruthy();
+    expect(screen.getByText(/Model Lab was NOT_RUN/)).toBeTruthy();
+    expect(screen.getAllByText(/research\.sqlite3 is NOT AUTHORIZED/)).toHaveLength(2);
   });
 
-  it("keeps accepted Feature and Strategy Studios usable and opens the Model Lab without fabricated models", async () => {
+  it("keeps accepted Feature Studio, Strategy Studio, and Model Lab usable and shows Policy Studio as authorized but not started", async () => {
     mockIPC((command) => {
       if (command === "get_foundation_status") return fixtureSnapshot;
       if (command === "get_feature_registry") {
@@ -229,10 +246,11 @@ describe("desktop shell navigation", () => {
     expect(await screen.findByText("Register a model that verifies as READY first.")).toBeTruthy();
     expect(screen.getByText("No models registered yet.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Policy Studio/ }));
-    expect(await screen.findByRole("heading", { name: "Policy Studio is not implemented yet" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Policy Studio implementation has not started" })).toBeTruthy();
+    expect(screen.getByText("ACTIVE NOT STARTED")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Overview/ }));
     expect(await screen.findByText(/Desktop UI and CSV import review were waived, NOT TESTED/)).toBeTruthy();
-    expect(screen.getAllByText(/Known debt \(unresolved\)/)).toHaveLength(6);
+    expect(screen.getAllByText(/Known debt \(unresolved\)/)).toHaveLength(11);
   });
 
   it("shows bounded catalog verification progress and cancellation", async () => {

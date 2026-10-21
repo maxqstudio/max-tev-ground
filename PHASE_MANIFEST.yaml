@@ -1,54 +1,53 @@
 schema_version: 3
-phase: RG-R04
+phase: RG-R05
 lifecycle: ACTIVE
 deliverables:
-  - local_runtime_boundary
-  - model_discovery
-  - model_identity_registry
-  - runtime_adapters
-  - verified_model_input
-  - immutable_inference_records
-  - model_comparison
+  - verified_policy_input
+  - typed_policy_dsl
+  - policy_evaluator
+  - visual_policy_builder
+  - extension_sandbox
+  - immutable_policy_decision_sets
   - resource_controls
-  - model_lab_ui
+  - policy_studio_ui
   - acceptance_evidence
 acceptance_gates:
-  - id: local_runtime_boundary
-    requirement: Model runtimes are reached only through an Owner-configured loopback Ollama endpoint or a user-selected local ONNX file copied into application storage; no model pull or download, remote endpoint, redirect, credential, shell, or process command is exposed, and an unavailable runtime is reported as unavailable, never as model output.
-    evidence: Tests with a local mock runtime reject non-loopback hosts, redirects, pull and delete requests, path-taking requests, and oversized or malformed responses; CI uses no real network or installed runtime, and SECURITY.md records the adapter threat review.
-  - id: model_discovery
-    requirement: Discovery lists local Ollama models and selected ONNX files with their reported metadata as unregistered candidates and never registers, pulls, or runs a model without explicit confirmation.
-    evidence: Discovery tests cover an absent runtime, empty, duplicate, malformed, and changed listings, and prove that discovery alone creates no registry entry and no inference.
-  - id: immutable_model_identity
-    requirement: Model identity binds adapter ID, model name, content digest (Ollama manifest digest or ONNX file SHA-256), declared input and output schema, and normalized runtime configuration; a registered model whose content changes is quarantined, never silently re-identified.
-    evidence: Identity tests show deterministic IDs, new identities for any changed digest, schema, or configuration, and quarantine with a diagnostic naming the model when a registered digest no longer matches.
-  - id: typed_runtime_adapters
-    requirement: Ollama and ONNX adapters declare typed bounded runtime parameters, fixed decoding settings and seeds where the runtime supports them, and exact tensor or response schemas, and reject unknown parameters and outputs that do not match the declared schema.
-    evidence: Adapter tests with labeled fixture models and a mock Ollama runtime validate parameter bounds, schema mismatches, non-finite outputs, and rejection of unknown fields.
-  - id: verified_model_input
-    requirement: Inference consumes only registered READY RG-R02 feature sets or RG-R03 decision sets, re-verified at consumption and around every read, and each row's model input uses only values available at that row's UTC decision time.
-    evidence: Tests reject blocked, quarantined, tampered, and changed-identity inputs, and perturbation tests prove that future rows cannot change any earlier model input or output record.
-  - id: model_authority_boundary
-    requirement: Every model output is a research record with an explicit declared authority; RG-R04 executes only ADVISORY_ONLY outputs and never creates, alters, vetoes, or overrides an RG-R03 decision, sizes a position, or emits an order.
-    evidence: Tests show stored decision sets stay byte-identical after inference and comparison, requests for any other authority are refused in this phase, and no order, broker, or MT5 interface exists.
-  - id: inference_materialization
-    requirement: Inference-record identity binds model identity, input set identity and hashes, and normalized configuration to canonical sorted output rows with a digest, through staged preview, explicit confirmation, and atomic promotion; a replay that does not reproduce the output is recorded as non-deterministic, never overwritten.
-    evidence: Tests verify staged preview, confirmation, crash-recoverable promotion, byte-identical ONNX replay, recorded non-determinism for a mock runtime that varies its output, and new identities for changed inputs or configuration.
-  - id: model_comparison
-    requirement: Comparison covers two or more registered inference records over the same input identity and reports only descriptive agreement, coverage, error, and latency statistics, never PnL, win rate, profitability, or a claim of edge.
-    evidence: Comparison tests check hand-calculated agreement and coverage on fixtures, refuse records over different input identities, and assert that no performance or edge field exists in the output.
+  - id: policy_input_authority
+    requirement: Policy evaluation consumes only registered READY RG-R02 feature sets, RG-R03 decision sets, and RG-R04 inference records over one shared input identity, re-verified at consumption and around every read; no feature, decision, or model output is recomputed and no market bar is synthesized.
+    evidence: Tests reject blocked, quarantined, missing, tampered, stale, and changed-identity inputs, inputs over different input identities, and prove that evaluation reads verified private copies only.
+  - id: typed_policy_dsl
+    requirement: The policy language has a versioned, documented grammar of typed expressions over declared inputs, with bounded source size, nesting depth, and evaluation cost, a deterministic canonical form, and no file, network, process, environment, clock, or randomness access; unknown or ill-typed constructs are rejected with located diagnostics.
+    evidence: Parser and type-checker tests cover the grammar, canonical round trips, every bound, type errors, and unknown constructs, and generated or malformed sources never panic or exceed their bounds.
+  - id: policy_decision_semantics
+    requirement: Each evaluation emits exactly one BUY, SELL, or SKIP research decision per target closed bar with explicit reason codes and input lineage, and the same policy over the same inputs always yields identical decisions.
+    evidence: Golden decisions are compared with hand-calculated independent references, including rule precedence, threshold equality, every SKIP reason, and conflicting rules that never emit BUY and SELL for one bar.
+  - id: causal_no_lookahead
+    requirement: A policy decision at a target bar uses only feature, decision, and inference values available at that bar's UTC decision time and never a future row, future label, or unfinished higher-timeframe reference.
+    evidence: Perturbation tests change future target, reference, and inference rows and prove that every earlier policy decision and its digest is unchanged.
+  - id: policy_authority_boundary
+    requirement: A model output influences a policy decision only through an authority the policy declares explicitly for that model input, recorded in the decision lineage; policy outputs are research decision records that never alter an accepted RG-R03 decision set or RG-R04 inference record, size a live position, emit or route an order, contact a broker or MT5, or promote a Champion.
+    evidence: Tests refuse undeclared and unknown authorities, show upstream decision sets and inference records stay byte-identical after evaluation, record the authority used for every decision, and show no order, broker, MT5, or Champion-promotion interface exists.
+  - id: visual_policy_builder
+    requirement: The visual policy builder edits the same typed policy model as the text language, emits only canonical source that the parser accepts, round-trips every valid policy without semantic change, and cannot express a construct the language rejects.
+    evidence: Builder tests show text-to-builder and builder-to-text round trips, identical policy identities for equivalent text and visual edits, and validation errors surfaced in the builder.
+  - id: isolated_extensions
+    requirement: Extensions are registered by content digest after explicit confirmation, declare a typed interface, and run isolated with no file system, network, process, environment, clock, or randomness access under instruction, memory, and time limits; an extension whose content changes is quarantined, never silently re-identified.
+    evidence: Adversarial extension fixtures attempting file, network, process, and clock access, unbounded loops, and memory exhaustion are refused or stopped within their limits with diagnostics, and digest-drift tests quarantine the extension.
+  - id: immutable_policy_materialization
+    requirement: Policy decision-set identity binds the canonical policy source and language version, extension digests, input identities and hashes, and temporal semantics to canonical sorted decision rows with a digest, through staged preview, explicit confirmation, and atomic promotion.
+    evidence: Tests verify staged preview, confirmation, crash-recoverable promotion, idempotent replay with byte-identical output, and new identities for any changed policy, extension, or input.
   - id: resource_cancel_recovery
-    requirement: Inference runs off the UI thread in bounded batches with request timeouts, bounded concurrency, row and byte quotas, progress, cancellation, and safe recovery after interruption without force-killing an external runtime.
-    evidence: Capacity, timeout, quota, cancellation, runtime-crash, and interrupted-promotion restart tests leave no partial registered model or inference record.
-  - id: desktop_model_lab_ipc
-    requirement: The desktop flow discovers candidates, registers a model after explicit confirmation, selects a verified input, previews and confirms inference, compares records, and inspects lineage, with runtime unavailability shown truthfully.
-    evidence: Tauri IPC and frontend tests exercise the asynchronous flow, runtime-unavailable and error states, cancellation, and results without layout redesign or fabricated model output.
+    requirement: Policy evaluation and extension calls run off the UI thread in bounded batches with row and byte quotas, per-call extension limits, progress, cancellation, and safe recovery after interruption.
+    evidence: Capacity, quota, cancellation, extension-limit, and interrupted-promotion restart tests leave no partial registered policy, extension, or decision set.
+  - id: desktop_policy_studio_ipc
+    requirement: The desktop flow authors a policy in text or with the visual builder, validates it, selects verified inputs, previews and confirms decisions with SKIP reasons, and inspects lineage and declared authorities.
+    evidence: Tauri IPC and frontend tests exercise the asynchronous flow, validation and error states, cancellation, and results without layout redesign or fabricated decisions.
   - id: adversarial_tamper
-    requirement: Tampered model files, changed runtime digests, tampered inference outputs or manifests, and tampered upstream feature or decision sets are quarantined and cannot be consumed or reported as READY.
-    evidence: Checksum tamper, digest drift, missing-file, malformed-response, and post-registration upstream tamper tests fail closed with diagnostics naming the affected identity.
+    requirement: Tampered policy definitions, extension modules, decision outputs or manifests, and tampered upstream feature sets, decision sets, or inference records are quarantined and cannot be consumed or reported as READY.
+    evidence: Checksum tamper, digest drift, missing-file, malicious-extension, and post-registration upstream tamper tests fail closed with diagnostics naming the affected identity.
   - id: reproducible_acceptance
     requirement: Acceptance evidence records all declared gates against an exact clean commit and tree with source revision and reproducible toolchain.
     evidence: PowerShell and GitHub CI reports, per-gate logs, checksums, artifact identity, workflow status, and source SHA/tree agree exactly.
   - id: owner_ui_acceptance
-    requirement: Owner reviews the RG-R04 Model Lab workflow separately from automated fixture and IPC tests.
+    requirement: Owner reviews the RG-R05 Policy Studio workflow separately from automated fixture and IPC tests.
     evidence: Manual UI review is explicitly recorded as pending, waived, or accepted and is never inferred from compilation or component tests.
