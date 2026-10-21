@@ -16,6 +16,7 @@ tauri-build.workspace = true
 rg-data-ground = { path = "../crates/rg-data-ground" }
 rg-feature-studio = { path = "../crates/rg-feature-studio" }
 rg-governance = { path = "../crates/rg-governance" }
+rg-model-registry = { path = "../crates/rg-model-registry" }
 rg-persistence = { path = "../crates/rg-persistence" }
 rg-strategy-engine = { path = "../crates/rg-strategy-engine" }
 serde.workspace = true
@@ -24,5 +25,6 @@ tauri-plugin-dialog.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+rg-model-registry = { path = "../crates/rg-model-registry", features = ["test-fixtures"] }
 serde_json.workspace = true
 tempfile.workspace = true

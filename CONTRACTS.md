@@ -66,3 +66,50 @@ The executable Rust contract is `rg-strategy-engine::spec`. A `DecisionSetReques
   - `restore_schema_backup` (`rg-schema-backup restore`, `RESTORE_DATABASE_BACKUP.ps1`) accepts only a backup that verifies against its receipt, and refuses while the database is in use. It renames the current database, WAL, and shared-memory files aside (never deleting them), installs a copy, and checks it against the receipt. If that final check fails, the installed copy is moved aside as `.failed-restore-*` and the original files are put back; if that rollback cannot complete, the error names where each state is. A successful restore lets a schema 6 build reopen the store with its dataset and feature-set content unchanged.
   - Trust limit: the receipt detects accidental or out-of-band changes to a backup alone. It is a checksum, not a signature, so it does not protect against someone able to rewrite both the backup and its receipt.
 - Decisions are research records. Nothing in this contract places, sizes, routes, or simulates an order, or computes a position, PnL, backtest, or performance metric.
+
+# Model registry and inference contracts (RG-R04, schema 1)
+
+The executable Rust contract is `rg-model-registry::spec`. Every request type uses strict typed JSON (`deny_unknown_fields`). No request field accepts a filesystem path, an endpoint other than the stored loopback setting, an order or position field, or any broker field.
+
+- Adapters:
+  - `OLLAMA_LOOPBACK` (`ollama-generate-json/1`) uses models already installed in an Ollama runtime at the Owner-configured loopback endpoint (default `http://127.0.0.1:11434`).
+  - `ONNX_NATIVE` (`rg-native-onnx/1`) runs a `.onnx` file copied into application storage through the built-in interpreter. It supports opsets 7–21 of the default domain and the operators `Add`, `Clip`, `Concat`, `Div`, `Flatten`, `Gemm`, `Identity`, `LeakyRelu`, `MatMul`, `Mul`, `Relu`, `Reshape`, `Sigmoid`, `Softmax`, `Sub`, and `Tanh`. A model needs one FLOAT input of shape `[N]` or `[1|batch, N]` and FLOAT outputs. Anything else is refused at discovery with a diagnostic naming the reason.
+- Discovery: `discover_ollama` lists installed models with their manifest digests, and `stage_onnx_candidate` copies and inspects a selected file. Both produce unregistered candidates only. An absent runtime is `UNAVAILABLE`, and a listing with any entry lacking a valid name or SHA-256 digest is `MALFORMED`; neither is ever reported as an empty runtime. A name listed more than once is ineligible. Staged ONNX candidates are discarded when the application restarts.
+- Registration request: a candidate ID, the declared input field names, the declared outputs, runtime parameters, and `authority`.
+  - Output fields are `FLOAT64` with finite `minimum` < `maximum`, or `CATEGORY` with 2–16 unique `UPPER_SNAKE_CASE` labels. ONNX outputs must be `FLOAT64`, and their input and output counts must equal the model's tensor widths.
+  - Ollama parameters are `seed`, `max_output_tokens` (16–1024), `context_tokens` (512–32768), and an `instruction` of up to 2000 printable characters. ONNX takes no parameters.
+  - Decoding is fixed by the adapter and recorded in the identity. Ollama uses temperature 0, `top_k` 1, `top_p` 1, no streaming, and a JSON-schema answer format. ONNX evaluates FLOAT32, sequentially, one row at a time.
+  - `authority` must be `ADVISORY_ONLY`. `DECISION_FILTER`, `DECISION_VETO`, `DECISION_OVERRIDE`, `POSITION_SIZING`, and `ORDER_GENERATION` are refused as `AUTHORITY_REFUSED`; any other value is invalid.
+- Model identity: `model_id = "md_" + sha256(ModelIdentity)`. The identity binds:
+  - the schema and registry versions, and the adapter and its version;
+  - the model name and the content digest (the Ollama manifest digest or the ONNX file SHA-256);
+  - the input fields and output schema;
+  - the normalized runtime parameters and fixed decoding settings;
+  - the ONNX tensor and operator summary, and the authority.
+
+  `preview_registration` computes the identity without registering anything. `register_model` rebuilds the request against the candidate's current content and registers only if it reproduces the confirmed `model_id`; a changed runtime listing or staged file fails as `CANDIDATE_CHANGED`. An ONNX registration stores `model.onnx` beside its manifest.
+- Model verification: every catalogue read rechecks the manifest and, for ONNX, the stored file's size and SHA-256. Ollama models are checked against one live listing per read. A missing or changed digest makes the model `QUARANTINED`, with a diagnostic naming the model and both digests. The registration itself never changes. An unreachable runtime makes the model `RUNTIME_UNAVAILABLE`. Inference requires `READY`.
+- Inference request: a `model_id`, an input set (`FEATURE_SET` `fs_<sha256>` or `DECISION_SET` `dc_<sha256>`), one binding per declared input field, `authority`, and quotas (`max_rows`, `max_output_bytes`, and `request_timeout_ms` of 100–120000).
+  - On a feature set, a field binds one feature output. Its row status must be `READY`, or the row is `SKIPPED` with `WARMUP`, `STALE`, or `NO_OBSERVATION`.
+  - On a decision set, a field binds an `input__<role>` value or the decision itself, encoded `BUY` = 1, `SELL` = −1, `SKIP` = 0.
+  - A missing or non-finite value skips the row with `NON_FINITE_INPUT` without calling the model.
+- Inference semantics version 1: each input row yields exactly one output row, in ascending decision-time order. A row's model input comes only from that row's bound values, and the model gets no timestamp, symbol, or other row. An answer that is not exactly the declared fields, or that has a non-finite or out-of-bounds number or an undeclared label, is `INVALID_OUTPUT` with `SCHEMA_MISMATCH`, `NON_FINITE_OUTPUT`, or `OUT_OF_RANGE`, and no value. A runtime that is unavailable, fails, times out, or drops the connection stops the run; it is never recorded as output.
+- Input verification: the input is taken through `consumable_feature_set` or `StrategyStore::output_path`, copied privately while hashing, and must match its manifest. While reading, the engine checks the Parquet schema against the manifest and recomputes the upstream row fingerprint and row count. The input is re-verified after the run and again at confirmation; any change fails closed.
+- Inference record identity: `record_id = "ir_" + sha256(InferenceIdentity)`. The identity binds the schema and registry versions, the inference semantics, the model reference (ID, identity SHA-256, adapter, name, and content digest), and the input identity (kind, ID, identity, manifest and output SHA-256, row fingerprint, row count, and target). It also binds the normalized bindings and the authority. Quotas and timeouts are not part of it.
+- Output: `inference.parquet` has these columns, in this order:
+  - `symbol`, `timeframe`, `open_time_utc`, `decision_time_utc`;
+  - `row_status` (`OK`, `SKIPPED`, or `INVALID_OUTPUT`) and a nullable `reason_code`;
+  - one nullable `input__<field>` float per input field, then one nullable `output__<field>` per output (float or label).
+
+  The manifest records:
+  - the output SHA-256 and row fingerprint;
+  - the OK, skipped, and invalid counts with their reasons;
+  - descriptive run timings, which are not part of the identity or digest;
+  - the model and input lineage down to the source datasets;
+  - `authority: ADVISORY_ONLY` and `READY` status.
+- Materialization and replay: preview runs into a private stage, and `commit_inference` promotes it through a journal (`model_lab_promotions`) after re-verifying the input and model. Recovery on restart completes a consistent journal entry and otherwise fails closed, preserving evidence. Committing an identity that already exists never overwrites it. The run is stored in `inference_replays` as `REPRODUCED` when its output SHA-256 matches, and as `NON_DETERMINISTIC` when it does not. The record's determinism is `NOT_REPLAYED`, `REPRODUCED`, or `NON_DETERMINISTIC`.
+- Record verification: every catalogue read rechecks the manifest and output digest, re-verifies the consumed feature or decision set (and through it the source datasets), and re-verifies the model registration and stored ONNX file. A change anywhere makes the record `QUARANTINED`, with a diagnostic naming the affected identity. The live Ollama listing is not consulted for records: a record keeps the digest it was computed with.
+- Comparison: `compare` accepts 2–8 distinct `READY` records over the same input identity, re-verifying each output copy and its row fingerprint. For each record it reports coverage (OK rows / rows), the invalid-output rate, and recorded latency. For each record pair and output field it reports rows where both records are OK, plus category agreement or the mean and maximum absolute numeric difference. It has no labels or prices, so it reports no accuracy against outcomes, PnL, win rate, profitability, or edge.
+- Resources: one inference job runs at a time, off the UI thread. Requests are sequential, at most one in flight, each with its own timeout. Row and byte quotas are checked before and during the run and on the final file size. Cancellation is checked before every row. ONNX models are additionally bounded at load by node, parameter, tensor-size, and per-row operation limits.
+- SQLite schema 8 adds immutable `model_registrations`, `inference_records` (foreign key to `model_registrations`), and `inference_replays`; a `model_lab_promotions` journal; immutable `model_lab_attempts`; and a `model_lab_settings` table that accepts only `ollama_endpoint`. The upgrade from schema 7 (or 6) takes the same verified, receipted backup as earlier upgrades.
+- Inference records are research records. Nothing in this contract creates, alters, vetoes, or overrides a decision, sizes a position, or places, routes, or simulates an order.

@@ -89,9 +89,9 @@ After the [Control Room re-audit #5587712394](https://github.com/maxqstudio/max-
 
 ## RG-R04 activation (governance only)
 
-RG-R04 Ollama and ONNX Model Registry is activated by this governance change, as instructed in [Issue #7 comment #6295197683](https://github.com/maxqstudio/max-tev-ground/issues/7#issuecomment-6295197683). No model code exists: `builder_status` is `NOT_STARTED` and `automated_status` is `NOT_RUN`. Owner UI status and Owner acceptance are `PENDING`, and RG-R05–RG-R08 stay locked. Implementation waits for the Control Room audit and merge of this change.
+RG-R04 Ollama and ONNX Model Registry was activated by a governance-only change, as instructed in [Issue #7 comment #6295197683](https://github.com/maxqstudio/max-tev-ground/issues/7#issuecomment-6295197683). The Owner approved it after Control Room audit, and it merged as PR #10 at `129ac14ed79336bb20288d2c51cd0af2d4fd9d54`. At activation no model code existed: `builder_status` was `NOT_STARTED` and `automated_status` was `NOT_RUN`.
 
-The thirteen RG-R04 acceptance gates are frozen in `PHASE_MANIFEST.yaml` before implementation, and `rg-governance` rejects any change to that set: `local_runtime_boundary`, `model_discovery`, `immutable_model_identity`, `typed_runtime_adapters`, `verified_model_input`, `model_authority_boundary`, `inference_materialization`, `model_comparison`, `resource_cancel_recovery`, `desktop_model_lab_ipc`, `adversarial_tamper`, `reproducible_acceptance`, and `owner_ui_acceptance`. Until gate-traceable tests exist, each gate is reported `NOT_RUN`; generic suite success is never inherited.
+The thirteen RG-R04 acceptance gates were frozen in `PHASE_MANIFEST.yaml` before implementation, and `rg-governance` rejects any change to that set: `local_runtime_boundary`, `model_discovery`, `immutable_model_identity`, `typed_runtime_adapters`, `verified_model_input`, `model_authority_boundary`, `inference_materialization`, `model_comparison`, `resource_cancel_recovery`, `desktop_model_lab_ipc`, `adversarial_tamper`, `reproducible_acceptance`, and `owner_ui_acceptance`. A gate passes only on its own gate-traceable tests; generic suite success is never inherited.
 
 The frozen scope keeps RG-R04 a local research registry:
 - Runtimes are reached only through an Owner-configured loopback Ollama endpoint or a user-selected local ONNX file. The application never pulls or downloads a model, and it never calls a remote endpoint.
@@ -99,8 +99,44 @@ The frozen scope keeps RG-R04 a local research registry:
 - Model comparison reports descriptive agreement, coverage, error, and latency only, never PnL, win rate, or edge.
 - CI uses mock runtimes and labeled fixture models; no installed runtime or network is assumed.
 
+## RG-R04 implementation status
+
+The Builder implemented RG-R04 on `work/rg-r04-model-registry`, branched from the validated `main` merge `129ac14ed79336bb20288d2c51cd0af2d4fd9d54` (governance PR #10) after post-merge CI [#39527456255](https://github.com/maxqstudio/max-tev-ground/actions/runs/39527456255) succeeded, as the [PR #10 Builder handoff](https://github.com/maxqstudio/max-tev-ground/pull/10#issuecomment-6305739611) instructed. `builder_status` is `IMPLEMENTED`. The automated status this candidate claims is verified by the acceptance runner and CI on its exact commit. Owner UI status and Owner acceptance are `PENDING`, and RG-R05–RG-R08 stay locked. This submission is for a separate Control Room audit; the Builder does not merge it.
+
+What exists:
+- `rg-model-registry`, with:
+  - a loopback-only HTTP client limited to three permitted calls;
+  - the Ollama adapter and the native ONNX decoder and interpreter;
+  - typed registration, inference, and record contracts;
+  - the model and inference-record store, with staging, a journal, recovery, quarantine, and replay recording;
+  - descriptive comparison.
+- Schema 8 in `rg-persistence`: immutable model registrations, inference records, and replays; a promotion journal; immutable attempts; and the endpoint setting. The upgrade takes the existing verified backup.
+- Model Lab Tauri commands and the Model Lab page. These replace the "implementation has not started" placeholder and use the existing page layout and styles; there is no visual redesign.
+- `SECURITY.md` records the adapter threat review, and `CONTRACTS.md` the RG-R04 contracts.
+
+Design decisions for the Control Room to review:
+- **Native ONNX interpreter instead of an external runtime.** `ort` would bring native ONNX Runtime binaries. `tract-onnx` 0.22 resolves to about 160 crates, including native C builds; it reads external tensor data from paths named inside a model, and it does not bound allocations up front. The Builder instead decodes ONNX with a strict, bounded protobuf reader and evaluates a documented operator subset sequentially in FLOAT32. This keeps model files from causing file reads and makes resource limits checkable before a run. Replays on the same build are byte-identical. The cost is coverage: models using other operators, or tree-ensemble (`ai.onnx.ml`) models, are refused with a diagnostic rather than run.
+- **Minimal HTTP client instead of an HTTP library.** It accepts only literal loopback IPs, never follows redirects, and bounds every response, with no proxy, DNS, or TLS code path.
+- **Records keep their model digest.** A record's lineage checks its stored model registration and ONNX file, not the live Ollama listing. Runtime drift quarantines the model and blocks new inference, but it does not revoke records that were computed with the registered digest.
+- **Prompts contain no dates or symbols.** This keeps a language model from recalling what followed a date in its training data.
+
+Evidence and limits:
+- Rust gate tests cover the 11 technical gates:
+  - `rg-model-registry`: 18 unit tests and 29 integration tests.
+  - `rg-persistence`: 5 schema-8 tests.
+  - Tauri: 5 Model Lab IPC tests.
+- Vitest: 8 `gate desktop_model_lab_ipc` component tests.
+- Every test uses labeled synthetic fixture models and a loopback mock Ollama runtime. No real model runtime, model download, or network is used. Fixture outputs say nothing about any real model's quality, and real-market evaluation, profitability, PnL, OOS evidence, and trading edge remain **NOT_PROVEN**.
+- Manual desktop click-through of Model Lab is **NOT_RUN**; Owner UI review is pending and is not inferred from component tests.
+- Running this build against an existing research database upgrades it to schema 8 (from 7 or 6). Upgrading the Owner's `research.sqlite3` is **NOT AUTHORIZED**; this build has not been run against Owner data or on the Owner machine.
+- Carried debts are unchanged:
+  - the RG-R02 feature-output quota check before the Parquet footer;
+  - the RG-R01 `cancelPreview` cancel-to-refresh messaging;
+  - the deferred RG-R02 visual redesign;
+  - manual GUI review NOT_TESTED for accepted phases.
+
 ## Acceptance runner
 
 `RUN_ACCEPTANCE.ps1` is scoped to the RG-R04 candidate branch `work/rg-r04-model-registry` and to the governance-only activation branch `work/rg-r03-closure-rg-r04-activation`. It runs non-interactively from the authorized Windows root. It checks pinned Rust/Node toolchains, Windows prerequisites, roadmap synchronization, CI evidence contracts, Rust formatting/tests/lint/build, frontend lint/typecheck/tests/build, the phase gate-traceable tests, and the Tauri build when MSVC is available. It writes per-command logs and a checksummed report bound to the exact candidate SHA/tree. It never launches the desktop or reads, copies, or modifies the legacy research baseline.
 
-GitHub CI runs the same gate-traceable step and uploads source-bound evidence, including the per-gate logs. While RG-R04 records `builder_status: NOT_STARTED`, that step runs no gate tests, every RG-R04 gate is `NOT_RUN`, and the report's automated status is `NOT_RUN`; the local runner therefore exits with its not-passed code 3 even when every check succeeds. RG-R05–RG-R08 remain planned.
+GitHub CI runs the same gate-traceable step and uploads source-bound evidence, including the per-gate logs. Each RG-R04 technical gate passes only on its own `gate_<id>` Rust tests, plus `gate desktop_model_lab_ipc` Vitest tests for the desktop gate; a gate with no matching tests fails. `reproducible_acceptance` comes from the source and governance envelope, and `owner_ui_acceptance` stays `OWNER_UI_ACCEPTANCE_PENDING` until the Owner records a decision. RG-R05–RG-R08 remain planned.

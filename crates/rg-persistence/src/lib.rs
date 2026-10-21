@@ -5,7 +5,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 7;
+pub const CURRENT_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Error)]
 pub enum PersistenceError {
@@ -37,6 +37,10 @@ pub enum PersistenceError {
     DecisionSetAlreadyExists(String),
     #[error("decision set metadata is invalid: {0}")]
     InvalidDecisionSetMetadata(String),
+    #[error("model or inference record ID or identity already exists: {0}")]
+    ModelLabRecordAlreadyExists(String),
+    #[error("model lab metadata is invalid: {0}")]
+    InvalidModelLabMetadata(String),
     #[error("schema upgrade was not started because the pre-upgrade backup failed: {0}")]
     SchemaBackupFailed(String),
     #[error("schema backup restore was refused or failed: {0}")]
@@ -335,6 +339,116 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN
             SELECT RAISE(ABORT, 'decision attempt records are immutable');
         END;
+    ",
+    },
+    Migration {
+        version: 8,
+        name: "immutable_model_registry_and_inference_records",
+        sql: "
+        CREATE TABLE model_registrations (
+            model_id TEXT PRIMARY KEY NOT NULL CHECK (model_id = 'md_' || identity_sha256),
+            identity_sha256 TEXT NOT NULL UNIQUE CHECK (length(identity_sha256) = 64),
+            adapter TEXT NOT NULL CHECK (adapter IN ('OLLAMA_LOOPBACK', 'ONNX_NATIVE')),
+            manifest_json TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+            content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+            created_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status = 'READY')
+        );
+        CREATE TRIGGER model_registrations_prevent_update
+        BEFORE UPDATE ON model_registrations
+        BEGIN
+            SELECT RAISE(ABORT, 'model registrations are immutable');
+        END;
+        CREATE TRIGGER model_registrations_prevent_delete
+        BEFORE DELETE ON model_registrations
+        BEGIN
+            SELECT RAISE(ABORT, 'model registrations are immutable');
+        END;
+        CREATE TABLE inference_records (
+            record_id TEXT PRIMARY KEY NOT NULL CHECK (record_id = 'ir_' || identity_sha256),
+            identity_sha256 TEXT NOT NULL UNIQUE CHECK (length(identity_sha256) = 64),
+            model_id TEXT NOT NULL REFERENCES model_registrations(model_id),
+            input_id TEXT NOT NULL CHECK (length(input_id) = 67),
+            manifest_json TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+            content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+            created_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status = 'READY')
+        );
+        CREATE TRIGGER inference_records_prevent_update
+        BEFORE UPDATE ON inference_records
+        BEGIN
+            SELECT RAISE(ABORT, 'inference records are immutable');
+        END;
+        CREATE TRIGGER inference_records_prevent_delete
+        BEFORE DELETE ON inference_records
+        BEGIN
+            SELECT RAISE(ABORT, 'inference records are immutable');
+        END;
+        CREATE TABLE model_lab_promotions (
+            record_id TEXT PRIMARY KEY NOT NULL,
+            record_kind TEXT NOT NULL CHECK (record_kind IN ('MODEL', 'INFERENCE')),
+            staging_name TEXT NOT NULL,
+            identity_sha256 TEXT NOT NULL CHECK (length(identity_sha256) = 64),
+            parent_id TEXT NOT NULL,
+            input_id TEXT,
+            manifest_json TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+            content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+            created_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status = 'READY'),
+            attempt_id TEXT NOT NULL UNIQUE,
+            attempt_started_at_utc TEXT NOT NULL,
+            attempt_completed_at_utc TEXT NOT NULL
+        );
+        CREATE TABLE inference_replays (
+            replay_id TEXT PRIMARY KEY NOT NULL,
+            record_id TEXT NOT NULL REFERENCES inference_records(record_id),
+            replayed_at_utc TEXT NOT NULL,
+            output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+            outcome TEXT NOT NULL CHECK (outcome IN ('REPRODUCED', 'NON_DETERMINISTIC'))
+        );
+        CREATE INDEX inference_replays_record_idx ON inference_replays(record_id, replayed_at_utc);
+        CREATE TRIGGER inference_replays_prevent_update
+        BEFORE UPDATE ON inference_replays
+        BEGIN
+            SELECT RAISE(ABORT, 'inference replay records are immutable');
+        END;
+        CREATE TRIGGER inference_replays_prevent_delete
+        BEFORE DELETE ON inference_replays
+        BEGIN
+            SELECT RAISE(ABORT, 'inference replay records are immutable');
+        END;
+        CREATE TABLE model_lab_attempts (
+            attempt_id TEXT PRIMARY KEY NOT NULL,
+            started_at_utc TEXT NOT NULL,
+            completed_at_utc TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK (operation IN ('MODEL_REGISTRATION', 'INFERENCE')),
+            status TEXT NOT NULL CHECK (status IN (
+                'REGISTERED', 'MATERIALIZED', 'REUSED', 'NON_DETERMINISTIC', 'FAILED', 'CANCELLED'
+            )),
+            subject_id TEXT,
+            diagnostic_code TEXT,
+            diagnostic_message TEXT
+        );
+        CREATE INDEX model_lab_attempts_completed_idx
+            ON model_lab_attempts(completed_at_utc DESC, attempt_id);
+        CREATE TRIGGER model_lab_attempts_prevent_update
+        BEFORE UPDATE ON model_lab_attempts
+        BEGIN
+            SELECT RAISE(ABORT, 'model lab attempt records are immutable');
+        END;
+        CREATE TRIGGER model_lab_attempts_prevent_delete
+        BEFORE DELETE ON model_lab_attempts
+        BEGIN
+            SELECT RAISE(ABORT, 'model lab attempt records are immutable');
+        END;
+        CREATE TABLE model_lab_settings (
+            setting_key TEXT PRIMARY KEY NOT NULL CHECK (setting_key IN ('ollama_endpoint')),
+            setting_value TEXT NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        );
     ",
     },
 ];
@@ -2289,6 +2403,557 @@ pub fn list_decision_set_metadata_after(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// Which immutable Model Lab registry a record belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelLabRecordKind {
+    Model,
+    Inference,
+}
+
+impl ModelLabRecordKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "MODEL",
+            Self::Inference => "INFERENCE",
+        }
+    }
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Model => "md_",
+            Self::Inference => "ir_",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "MODEL" => Some(Self::Model),
+            "INFERENCE" => Some(Self::Inference),
+            _ => None,
+        }
+    }
+}
+
+/// Registry metadata of a registered model (`md_`) or inference record (`ir_`). For a model,
+/// `parent_id` is the adapter and `content_sha256` the model content digest; for an inference
+/// record, `parent_id` is the model ID, `input_id` the consumed feature or decision set, and
+/// `content_sha256` the output digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelLabRecordMetadata {
+    pub kind: ModelLabRecordKind,
+    pub record_id: String,
+    pub identity_sha256: String,
+    pub parent_id: String,
+    pub input_id: Option<String>,
+    pub manifest_json: String,
+    pub manifest_sha256: String,
+    pub content_sha256: String,
+    pub created_at_utc: String,
+    pub status: String,
+    pub manifest_integrity_valid: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ModelLabAttemptRecord {
+    pub attempt_id: String,
+    pub started_at_utc: String,
+    pub completed_at_utc: String,
+    pub operation: String,
+    pub status: String,
+    pub subject_id: Option<String>,
+    pub diagnostic_code: Option<String>,
+    pub diagnostic_message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingModelLabPromotion {
+    pub staging_name: String,
+    pub record: ModelLabRecordMetadata,
+    pub attempt: ModelLabAttemptRecord,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct InferenceReplayRecord {
+    pub replay_id: String,
+    pub record_id: String,
+    pub replayed_at_utc: String,
+    pub output_sha256: String,
+    pub outcome: String,
+}
+
+fn model_lab_invalid(reason: &str) -> PersistenceError {
+    PersistenceError::InvalidModelLabMetadata(reason.into())
+}
+
+fn valid_sha(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_prefixed(value: &str, prefixes: &[&str]) -> bool {
+    prefixes
+        .iter()
+        .any(|prefix| value.strip_prefix(prefix).is_some_and(valid_sha))
+}
+
+fn validate_model_lab_record(record: &ModelLabRecordMetadata) -> Result<(), PersistenceError> {
+    let lineage_valid = match record.kind {
+        ModelLabRecordKind::Model => {
+            matches!(record.parent_id.as_str(), "OLLAMA_LOOPBACK" | "ONNX_NATIVE")
+                && record.input_id.is_none()
+        }
+        ModelLabRecordKind::Inference => {
+            valid_prefixed(&record.parent_id, &["md_"])
+                && record
+                    .input_id
+                    .as_deref()
+                    .is_some_and(|input| valid_prefixed(input, &["fs_", "dc_"]))
+        }
+    };
+    if !valid_sha(&record.identity_sha256)
+        || record.record_id != format!("{}{}", record.kind.prefix(), record.identity_sha256)
+        || !lineage_valid
+        || !valid_sha(&record.manifest_sha256)
+        || !valid_sha(&record.content_sha256)
+        || record.created_at_utc.trim().is_empty()
+        || record.status != "READY"
+    {
+        return Err(model_lab_invalid(
+            "identifier, lineage, digest, timestamp, or status is invalid",
+        ));
+    }
+    if record.manifest_sha256 != checksum(&record.manifest_json) {
+        return Err(model_lab_invalid(
+            "manifest SHA-256 does not match manifest bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_model_lab_attempt(
+    attempt: &ModelLabAttemptRecord,
+    allowed: &[&str],
+) -> Result<(), PersistenceError> {
+    if attempt.attempt_id.trim().is_empty()
+        || attempt.started_at_utc.trim().is_empty()
+        || attempt.completed_at_utc.trim().is_empty()
+        || !matches!(
+            attempt.operation.as_str(),
+            "MODEL_REGISTRATION" | "INFERENCE"
+        )
+        || !allowed.contains(&attempt.status.as_str())
+    {
+        return Err(model_lab_invalid("model lab attempt metadata is invalid"));
+    }
+    Ok(())
+}
+
+pub fn save_pending_model_lab_promotion(
+    connection: &Connection,
+    pending: &PendingModelLabPromotion,
+) -> Result<(), PersistenceError> {
+    validate_model_lab_record(&pending.record)?;
+    let terminal = match pending.record.kind {
+        ModelLabRecordKind::Model => "REGISTERED",
+        ModelLabRecordKind::Inference => "MATERIALIZED",
+    };
+    validate_model_lab_attempt(&pending.attempt, &[terminal])?;
+    validate_staging_name(&pending.staging_name)?;
+    let record = &pending.record;
+    connection.execute(
+        "INSERT INTO model_lab_promotions (
+            record_id, record_kind, staging_name, identity_sha256, parent_id, input_id,
+            manifest_json, manifest_sha256, content_sha256, created_at_utc, status, attempt_id,
+            attempt_started_at_utc, attempt_completed_at_utc
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        rusqlite::params![
+            record.record_id,
+            record.kind.as_str(),
+            pending.staging_name,
+            record.identity_sha256,
+            record.parent_id,
+            record.input_id,
+            record.manifest_json,
+            record.manifest_sha256,
+            record.content_sha256,
+            record.created_at_utc,
+            record.status,
+            pending.attempt.attempt_id,
+            pending.attempt.started_at_utc,
+            pending.attempt.completed_at_utc,
+        ],
+    )?;
+    Ok(())
+}
+
+const PENDING_MODEL_LAB_COLUMNS: &str =
+    "record_id, record_kind, staging_name, identity_sha256, parent_id, input_id, manifest_json,
+     manifest_sha256, content_sha256, created_at_utc, status, attempt_id, attempt_started_at_utc,
+     attempt_completed_at_utc";
+
+fn pending_model_lab_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<(String, PendingModelLabPromotion), rusqlite::Error> {
+    let record_id: String = row.get(0)?;
+    let kind_text: String = row.get(1)?;
+    let kind = ModelLabRecordKind::parse(&kind_text).unwrap_or(ModelLabRecordKind::Model);
+    let manifest_json: String = row.get(6)?;
+    let manifest_sha256: String = row.get(7)?;
+    let pending = PendingModelLabPromotion {
+        staging_name: row.get(2)?,
+        record: ModelLabRecordMetadata {
+            kind,
+            record_id: record_id.clone(),
+            identity_sha256: row.get(3)?,
+            parent_id: row.get(4)?,
+            input_id: row.get(5)?,
+            manifest_integrity_valid: manifest_sha256 == checksum(&manifest_json),
+            manifest_json,
+            manifest_sha256,
+            content_sha256: row.get(8)?,
+            created_at_utc: row.get(9)?,
+            status: row.get(10)?,
+        },
+        attempt: ModelLabAttemptRecord {
+            attempt_id: row.get(11)?,
+            started_at_utc: row.get(12)?,
+            completed_at_utc: row.get(13)?,
+            operation: match kind {
+                ModelLabRecordKind::Model => "MODEL_REGISTRATION".into(),
+                ModelLabRecordKind::Inference => "INFERENCE".into(),
+            },
+            status: match kind {
+                ModelLabRecordKind::Model => "REGISTERED".into(),
+                ModelLabRecordKind::Inference => "MATERIALIZED".into(),
+            },
+            subject_id: Some(record_id),
+            diagnostic_code: None,
+            diagnostic_message: None,
+        },
+    };
+    Ok((kind_text, pending))
+}
+
+fn decode_pending_model_lab(
+    (kind_text, pending): (String, PendingModelLabPromotion),
+) -> Result<PendingModelLabPromotion, PersistenceError> {
+    if ModelLabRecordKind::parse(&kind_text).is_none() {
+        return Err(model_lab_invalid("journal names an unknown record kind"));
+    }
+    validate_model_lab_record(&pending.record)?;
+    validate_staging_name(&pending.staging_name)?;
+    Ok(pending)
+}
+
+pub fn list_pending_model_lab_promotions(
+    connection: &Connection,
+) -> Result<Vec<PendingModelLabPromotion>, PersistenceError> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {PENDING_MODEL_LAB_COLUMNS} FROM model_lab_promotions ORDER BY record_kind DESC, record_id"
+    ))?;
+    let rows = statement.query_map([], pending_model_lab_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(decode_pending_model_lab)
+        .collect()
+}
+
+pub fn clear_pending_model_lab_promotion(
+    connection: &Connection,
+    record_id: &str,
+) -> Result<bool, PersistenceError> {
+    Ok(connection.execute(
+        "DELETE FROM model_lab_promotions WHERE record_id = ?1",
+        [record_id],
+    )? == 1)
+}
+
+/// Registers the journaled model or inference record and its terminal attempt in one transaction,
+/// then removes the journal entry. A failure leaves the journal for recovery.
+pub fn complete_pending_model_lab_promotion(
+    connection: &mut Connection,
+    record_id: &str,
+) -> Result<(), PersistenceError> {
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let pending = {
+        let mut statement = tx.prepare(&format!(
+            "SELECT {PENDING_MODEL_LAB_COLUMNS} FROM model_lab_promotions WHERE record_id = ?1"
+        ))?;
+        let mut rows = statement.query([record_id])?;
+        rows.next()?.map(pending_model_lab_from_row).transpose()?
+    }
+    .ok_or_else(|| model_lab_invalid(&format!("pending promotion is missing for {record_id}")))
+    .and_then(decode_pending_model_lab)?;
+    let record = &pending.record;
+    let inserted = match record.kind {
+        ModelLabRecordKind::Model => tx.execute(
+            "INSERT INTO model_registrations (
+                model_id, identity_sha256, adapter, manifest_json, manifest_sha256,
+                content_sha256, created_at_utc, status
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                record.record_id,
+                record.identity_sha256,
+                record.parent_id,
+                record.manifest_json,
+                record.manifest_sha256,
+                record.content_sha256,
+                record.created_at_utc,
+                record.status,
+            ],
+        ),
+        ModelLabRecordKind::Inference => tx.execute(
+            "INSERT INTO inference_records (
+                record_id, identity_sha256, model_id, input_id, manifest_json, manifest_sha256,
+                content_sha256, created_at_utc, status
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                record.record_id,
+                record.identity_sha256,
+                record.parent_id,
+                record.input_id,
+                record.manifest_json,
+                record.manifest_sha256,
+                record.content_sha256,
+                record.created_at_utc,
+                record.status,
+            ],
+        ),
+    };
+    match inserted {
+        Ok(_) => {}
+        Err(error)
+            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
+                && get_model_lab_record(&tx, record.kind, &record.record_id)?.is_some() =>
+        {
+            return Err(PersistenceError::ModelLabRecordAlreadyExists(
+                record.record_id.clone(),
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    insert_model_lab_attempt(&tx, &pending.attempt)?;
+    tx.execute(
+        "DELETE FROM model_lab_promotions WHERE record_id = ?1",
+        [record_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn insert_model_lab_attempt(
+    connection: &Connection,
+    attempt: &ModelLabAttemptRecord,
+) -> Result<(), PersistenceError> {
+    connection.execute(
+        "INSERT INTO model_lab_attempts (
+            attempt_id, started_at_utc, completed_at_utc, operation, status, subject_id,
+            diagnostic_code, diagnostic_message
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            attempt.attempt_id,
+            attempt.started_at_utc,
+            attempt.completed_at_utc,
+            attempt.operation,
+            attempt.status,
+            attempt.subject_id,
+            attempt.diagnostic_code,
+            attempt.diagnostic_message
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn save_model_lab_attempt(
+    connection: &Connection,
+    attempt: &ModelLabAttemptRecord,
+) -> Result<(), PersistenceError> {
+    validate_model_lab_attempt(
+        attempt,
+        &["REUSED", "NON_DETERMINISTIC", "FAILED", "CANCELLED"],
+    )?;
+    insert_model_lab_attempt(connection, attempt)
+}
+
+pub fn list_model_lab_attempts(
+    connection: &Connection,
+    limit: u64,
+) -> Result<Vec<ModelLabAttemptRecord>, PersistenceError> {
+    let limit =
+        i64::try_from(limit).map_err(|_| model_lab_invalid("attempt page size is too large"))?;
+    let mut statement = connection.prepare(
+        "SELECT attempt_id, started_at_utc, completed_at_utc, operation, status, subject_id,
+                diagnostic_code, diagnostic_message
+         FROM model_lab_attempts ORDER BY completed_at_utc DESC, attempt_id LIMIT ?1",
+    )?;
+    let rows = statement.query_map([limit], |row| {
+        Ok(ModelLabAttemptRecord {
+            attempt_id: row.get(0)?,
+            started_at_utc: row.get(1)?,
+            completed_at_utc: row.get(2)?,
+            operation: row.get(3)?,
+            status: row.get(4)?,
+            subject_id: row.get(5)?,
+            diagnostic_code: row.get(6)?,
+            diagnostic_message: row.get(7)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn model_lab_query(kind: ModelLabRecordKind) -> &'static str {
+    match kind {
+        ModelLabRecordKind::Model => {
+            "SELECT model_id, identity_sha256, adapter, NULL, manifest_json, manifest_sha256,
+                    content_sha256, created_at_utc, status
+             FROM model_registrations"
+        }
+        ModelLabRecordKind::Inference => {
+            "SELECT record_id, identity_sha256, model_id, input_id, manifest_json, manifest_sha256,
+                    content_sha256, created_at_utc, status
+             FROM inference_records"
+        }
+    }
+}
+
+fn model_lab_key(kind: ModelLabRecordKind) -> &'static str {
+    match kind {
+        ModelLabRecordKind::Model => "model_id",
+        ModelLabRecordKind::Inference => "record_id",
+    }
+}
+
+fn model_lab_from_row(
+    kind: ModelLabRecordKind,
+    row: &rusqlite::Row<'_>,
+) -> Result<ModelLabRecordMetadata, rusqlite::Error> {
+    let manifest_json: String = row.get(4)?;
+    let manifest_sha256: String = row.get(5)?;
+    Ok(ModelLabRecordMetadata {
+        kind,
+        record_id: row.get(0)?,
+        identity_sha256: row.get(1)?,
+        parent_id: row.get(2)?,
+        input_id: row.get(3)?,
+        manifest_integrity_valid: manifest_sha256 == checksum(&manifest_json),
+        manifest_json,
+        manifest_sha256,
+        content_sha256: row.get(6)?,
+        created_at_utc: row.get(7)?,
+        status: row.get(8)?,
+    })
+}
+
+pub fn get_model_lab_record(
+    connection: &Connection,
+    kind: ModelLabRecordKind,
+    record_id: &str,
+) -> Result<Option<ModelLabRecordMetadata>, PersistenceError> {
+    let mut statement = connection.prepare(&format!(
+        "{} WHERE {} = ?1",
+        model_lab_query(kind),
+        model_lab_key(kind)
+    ))?;
+    let mut rows = statement.query([record_id])?;
+    Ok(rows
+        .next()?
+        .map(|row| model_lab_from_row(kind, row))
+        .transpose()?)
+}
+
+pub fn list_model_lab_records_after(
+    connection: &Connection,
+    kind: ModelLabRecordKind,
+    after_record_id: &str,
+    limit: u64,
+) -> Result<Vec<ModelLabRecordMetadata>, PersistenceError> {
+    let limit = i64::try_from(limit).map_err(|_| model_lab_invalid("page size is too large"))?;
+    let key = model_lab_key(kind);
+    let mut statement = connection.prepare(&format!(
+        "{} WHERE {key} > ?1 ORDER BY {key} LIMIT ?2",
+        model_lab_query(kind)
+    ))?;
+    let rows = statement.query_map(rusqlite::params![after_record_id, limit], |row| {
+        model_lab_from_row(kind, row)
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Records one replay of a registered inference record. Replays never change the record itself.
+pub fn save_inference_replay(
+    connection: &Connection,
+    replay: &InferenceReplayRecord,
+) -> Result<(), PersistenceError> {
+    if replay.replay_id.trim().is_empty()
+        || !valid_prefixed(&replay.record_id, &["ir_"])
+        || replay.replayed_at_utc.trim().is_empty()
+        || !valid_sha(&replay.output_sha256)
+        || !matches!(replay.outcome.as_str(), "REPRODUCED" | "NON_DETERMINISTIC")
+    {
+        return Err(model_lab_invalid("inference replay metadata is invalid"));
+    }
+    connection.execute(
+        "INSERT INTO inference_replays (replay_id, record_id, replayed_at_utc, output_sha256, outcome)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            replay.replay_id,
+            replay.record_id,
+            replay.replayed_at_utc,
+            replay.output_sha256,
+            replay.outcome
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_inference_replays(
+    connection: &Connection,
+    record_id: &str,
+) -> Result<Vec<InferenceReplayRecord>, PersistenceError> {
+    let mut statement = connection.prepare(
+        "SELECT replay_id, record_id, replayed_at_utc, output_sha256, outcome
+         FROM inference_replays WHERE record_id = ?1 ORDER BY replayed_at_utc, replay_id",
+    )?;
+    let rows = statement.query_map([record_id], |row| {
+        Ok(InferenceReplayRecord {
+            replay_id: row.get(0)?,
+            record_id: row.get(1)?,
+            replayed_at_utc: row.get(2)?,
+            output_sha256: row.get(3)?,
+            outcome: row.get(4)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn get_model_lab_setting(
+    connection: &Connection,
+    key: &str,
+) -> Result<Option<String>, PersistenceError> {
+    let mut statement = connection
+        .prepare("SELECT setting_value FROM model_lab_settings WHERE setting_key = ?1")?;
+    let mut rows = statement.query([key])?;
+    Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
+}
+
+pub fn set_model_lab_setting(
+    connection: &Connection,
+    key: &str,
+    value: &str,
+    updated_at_utc: &str,
+) -> Result<(), PersistenceError> {
+    connection.execute(
+        "INSERT INTO model_lab_settings (setting_key, setting_value, updated_at_utc)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(setting_key) DO UPDATE SET
+            setting_value = excluded.setting_value, updated_at_utc = excluded.updated_at_utc",
+        rusqlite::params![key, value, updated_at_utc],
+    )?;
+    Ok(())
+}
+
 fn checksum(value: &str) -> String {
     rg_contracts::Sha256Digest::of_bytes(value.as_bytes())
         .as_str()
@@ -3322,7 +3987,7 @@ mod tests {
         let feature_set = get_feature_set_metadata(&writer, &feature_set_id).unwrap();
         drop(writer);
 
-        // Upgrading adds schema 7 without touching existing dataset or feature lineage.
+        // Upgrading adds the newer schemas without touching existing dataset or feature lineage.
         let upgraded = open_database(&path).unwrap();
         assert_eq!(
             get_dataset_metadata(&upgraded, &dataset_id).unwrap(),
@@ -3336,7 +4001,7 @@ mod tests {
         assert!(matches!(
             open_as_schema_six_build(&path),
             Err(PersistenceError::FutureSchema {
-                found: 7,
+                found: CURRENT_SCHEMA_VERSION,
                 supported: 6
             })
         ));
@@ -3589,5 +4254,282 @@ mod tests {
         drop(open_database(&path).unwrap());
         assert!(list_schema_backups(&path).unwrap().is_empty());
         assert!(!directory.path().join(SCHEMA_BACKUP_DIRECTORY).exists());
+    }
+
+    fn pending_model(identity_char: char) -> PendingModelLabPromotion {
+        let identity = identity_char.to_string().repeat(64);
+        let manifest_json = format!("{{\"model_fixture\":\"{identity_char}\"}}");
+        PendingModelLabPromotion {
+            staging_name: "018f4c4f-7d9b-7b9f-a70e-92bb7cf04c64".into(),
+            record: ModelLabRecordMetadata {
+                kind: ModelLabRecordKind::Model,
+                record_id: format!("md_{identity}"),
+                identity_sha256: identity,
+                parent_id: "ONNX_NATIVE".into(),
+                input_id: None,
+                manifest_sha256: checksum(&manifest_json),
+                manifest_json,
+                content_sha256: "c".repeat(64),
+                created_at_utc: "2026-10-21T00:00:02Z".into(),
+                status: "READY".into(),
+                manifest_integrity_valid: true,
+            },
+            attempt: ModelLabAttemptRecord {
+                attempt_id: format!("model-attempt-{identity_char}"),
+                started_at_utc: "2026-10-21T00:00:01Z".into(),
+                completed_at_utc: "2026-10-21T00:00:02Z".into(),
+                operation: "MODEL_REGISTRATION".into(),
+                status: "REGISTERED".into(),
+                subject_id: None,
+                diagnostic_code: None,
+                diagnostic_message: None,
+            },
+        }
+    }
+
+    fn pending_inference(model_id: &str, input_id: &str) -> PendingModelLabPromotion {
+        let identity = "9".repeat(64);
+        let manifest_json = "{\"inference_fixture\":true}".to_owned();
+        PendingModelLabPromotion {
+            staging_name: "018f4c4f-7d9b-7b9f-a70e-92bb7cf04c65".into(),
+            record: ModelLabRecordMetadata {
+                kind: ModelLabRecordKind::Inference,
+                record_id: format!("ir_{identity}"),
+                identity_sha256: identity,
+                parent_id: model_id.into(),
+                input_id: Some(input_id.into()),
+                manifest_sha256: checksum(&manifest_json),
+                manifest_json,
+                content_sha256: "8".repeat(64),
+                created_at_utc: "2026-10-21T00:00:04Z".into(),
+                status: "READY".into(),
+                manifest_integrity_valid: true,
+            },
+            attempt: ModelLabAttemptRecord {
+                attempt_id: "inference-attempt-fixture".into(),
+                started_at_utc: "2026-10-21T00:00:03Z".into(),
+                completed_at_utc: "2026-10-21T00:00:04Z".into(),
+                operation: "INFERENCE".into(),
+                status: "MATERIALIZED".into(),
+                subject_id: None,
+                diagnostic_code: None,
+                diagnostic_message: None,
+            },
+        }
+    }
+
+    #[test]
+    fn gate_inference_materialization_model_lab_journal_registers_records_atomically() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate(&mut connection).unwrap();
+        let model = pending_model('7');
+        save_pending_model_lab_promotion(&connection, &model).unwrap();
+        assert_eq!(
+            list_pending_model_lab_promotions(&connection)
+                .unwrap()
+                .len(),
+            1
+        );
+        complete_pending_model_lab_promotion(&mut connection, &model.record.record_id).unwrap();
+        assert!(list_pending_model_lab_promotions(&connection)
+            .unwrap()
+            .is_empty());
+        let stored = get_model_lab_record(
+            &connection,
+            ModelLabRecordKind::Model,
+            &model.record.record_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(stored, model.record);
+
+        let input = format!("fs_{}", "f".repeat(64));
+        let inference = pending_inference(&model.record.record_id, &input);
+        save_pending_model_lab_promotion(&connection, &inference).unwrap();
+        complete_pending_model_lab_promotion(&mut connection, &inference.record.record_id).unwrap();
+        let records =
+            list_model_lab_records_after(&connection, ModelLabRecordKind::Inference, "", 10)
+                .unwrap();
+        assert_eq!(records, vec![inference.record.clone()]);
+        let attempts = list_model_lab_attempts(&connection, 10).unwrap();
+        assert_eq!(attempts.len(), 2);
+
+        // A journaled inference over an unregistered model cannot complete; the journal stays.
+        let orphan = pending_inference(&format!("md_{}", "6".repeat(64)), &input);
+        let orphan = PendingModelLabPromotion {
+            record: ModelLabRecordMetadata {
+                record_id: format!("ir_{}", "5".repeat(64)),
+                identity_sha256: "5".repeat(64),
+                ..orphan.record
+            },
+            attempt: ModelLabAttemptRecord {
+                attempt_id: "orphan-attempt".into(),
+                ..orphan.attempt
+            },
+            ..orphan
+        };
+        save_pending_model_lab_promotion(&connection, &orphan).unwrap();
+        assert!(
+            complete_pending_model_lab_promotion(&mut connection, &orphan.record.record_id)
+                .is_err()
+        );
+        assert_eq!(
+            list_pending_model_lab_promotions(&connection)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn gate_adversarial_tamper_model_lab_metadata_is_validated_and_immutable() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate(&mut connection).unwrap();
+        let mut bad = pending_model('4');
+        bad.record.manifest_sha256 = "0".repeat(64);
+        assert!(save_pending_model_lab_promotion(&connection, &bad).is_err());
+        let mut bad = pending_model('4');
+        bad.record.record_id = format!("ir_{}", "4".repeat(64));
+        assert!(save_pending_model_lab_promotion(&connection, &bad).is_err());
+        let mut bad = pending_model('4');
+        bad.record.parent_id = "REMOTE_HTTP".into();
+        assert!(save_pending_model_lab_promotion(&connection, &bad).is_err());
+        let bad = pending_inference(&format!("md_{}", "4".repeat(64)), "C:/features.parquet");
+        assert!(save_pending_model_lab_promotion(&connection, &bad).is_err());
+
+        let model = pending_model('3');
+        save_pending_model_lab_promotion(&connection, &model).unwrap();
+        complete_pending_model_lab_promotion(&mut connection, &model.record.record_id).unwrap();
+        let inference =
+            pending_inference(&model.record.record_id, &format!("dc_{}", "2".repeat(64)));
+        save_pending_model_lab_promotion(&connection, &inference).unwrap();
+        complete_pending_model_lab_promotion(&mut connection, &inference.record.record_id).unwrap();
+        save_inference_replay(
+            &connection,
+            &InferenceReplayRecord {
+                replay_id: "replay-1".into(),
+                record_id: inference.record.record_id.clone(),
+                replayed_at_utc: "2026-10-21T00:00:05Z".into(),
+                output_sha256: "1".repeat(64),
+                outcome: "NON_DETERMINISTIC".into(),
+            },
+        )
+        .unwrap();
+        assert!(save_inference_replay(
+            &connection,
+            &InferenceReplayRecord {
+                replay_id: "replay-2".into(),
+                record_id: inference.record.record_id.clone(),
+                replayed_at_utc: "2026-10-21T00:00:06Z".into(),
+                output_sha256: "1".repeat(64),
+                outcome: "OVERWRITTEN".into(),
+            },
+        )
+        .is_err());
+        for statement in [
+            "UPDATE model_registrations SET content_sha256 = 'x'",
+            "DELETE FROM model_registrations",
+            "UPDATE inference_records SET content_sha256 = 'x'",
+            "DELETE FROM inference_records",
+            "UPDATE inference_replays SET outcome = 'REPRODUCED'",
+            "DELETE FROM inference_replays",
+            "UPDATE model_lab_attempts SET status = 'REGISTERED'",
+            "DELETE FROM model_lab_attempts",
+        ] {
+            assert!(connection.execute(statement, []).is_err(), "{statement}");
+        }
+        assert_eq!(
+            list_inference_replays(&connection, &inference.record.record_id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn gate_local_runtime_boundary_model_lab_settings_accept_only_the_endpoint_key() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate(&mut connection).unwrap();
+        assert_eq!(
+            get_model_lab_setting(&connection, "ollama_endpoint").unwrap(),
+            None
+        );
+        set_model_lab_setting(
+            &connection,
+            "ollama_endpoint",
+            "http://127.0.0.1:11434",
+            "t1",
+        )
+        .unwrap();
+        set_model_lab_setting(
+            &connection,
+            "ollama_endpoint",
+            "http://127.0.0.1:11500",
+            "t2",
+        )
+        .unwrap();
+        assert_eq!(
+            get_model_lab_setting(&connection, "ollama_endpoint").unwrap(),
+            Some("http://127.0.0.1:11500".into())
+        );
+        assert!(
+            set_model_lab_setting(&connection, "remote_endpoint", "http://8.8.8.8", "t3").is_err()
+        );
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_failed_model_lab_migration_rolls_back_to_decision_schema() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let mut broken = MIGRATIONS[..7].to_vec();
+        broken.push(Migration {
+            version: 8,
+            name: "intentional_model_lab_failure_fixture",
+            sql: "CREATE TABLE model_registrations(id INTEGER); INSERT INTO missing_table VALUES (1);",
+        });
+        assert!(migrate_with(&mut connection, &broken, 8).is_err());
+        assert_eq!(schema_version(&connection).unwrap(), 7);
+        let model_tables = |connection: &Connection| -> u32 {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+                     AND (name LIKE 'model%' OR name LIKE 'inference%')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(model_tables(&connection), 0);
+        assert_eq!(migrate(&mut connection).unwrap(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(model_tables(&connection), 6);
+    }
+
+    #[test]
+    fn gate_resource_cancel_recovery_schema_upgrade_backs_up_a_populated_v7_store() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("research.sqlite3");
+        let v7_digest = {
+            let mut writer = Connection::open(&path).unwrap();
+            configure(&writer).unwrap();
+            assert_eq!(migrate_with(&mut writer, &MIGRATIONS[..7], 7).unwrap(), 7);
+            let feature_set = registered_feature_set(&mut writer);
+            let pending = pending_decision_set(&feature_set.feature_set_id);
+            save_pending_decision_set_promotion(&writer, &pending).unwrap();
+            complete_pending_decision_set_promotion(
+                &mut writer,
+                &pending.decision_set.decision_set_id,
+            )
+            .unwrap();
+            database_content_sha256(&writer).unwrap()
+        };
+        let upgraded = open_database(&path).unwrap();
+        assert_eq!(schema_version(&upgraded).unwrap(), 8);
+        let backups = list_schema_backups(&path).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(verified_snapshot(&backups[0]).unwrap(), (7, v7_digest));
+        assert_eq!(row_count(&upgraded, "decision_sets"), 1);
+        assert_eq!(row_count(&upgraded, "model_registrations"), 0);
     }
 }

@@ -685,8 +685,8 @@ mod tests {
         let result = validate_embedded().unwrap();
         assert_eq!(result.current_phase, "RG-R04");
         assert_eq!(result.phase_lifecycle, Lifecycle::Active);
-        assert_eq!(result.builder_status, BuilderStatus::NotStarted);
-        assert_eq!(result.automated_status, AutomatedStatus::NotRun);
+        assert_eq!(result.builder_status, BuilderStatus::Implemented);
+        assert_eq!(result.automated_status, AutomatedStatus::AutomatedPass);
         assert_eq!(result.owner_ui_status, OwnerUiStatus::Pending);
         assert_eq!(result.owner_acceptance, OwnerAcceptanceStatus::Pending);
         assert!(!result.next_phase_unlocked);
@@ -711,7 +711,7 @@ mod tests {
         assert_eq!(page_status("data-ground"), "OWNER_ACCEPTED");
         assert_eq!(page_status("feature-studio"), "OWNER_ACCEPTED");
         assert_eq!(page_status("strategy-studio"), "OWNER_ACCEPTED");
-        assert_eq!(page_status("model-lab"), "ACTIVE_NOT_STARTED");
+        assert_eq!(page_status("model-lab"), "IN_PROGRESS");
         assert_eq!(result.accepted_phases.len(), 4);
         let accepted_r03 = result
             .accepted_phases
@@ -1010,10 +1010,8 @@ mod tests {
 
     #[test]
     fn not_started_phase_cannot_claim_automated_pass() {
-        let changed = IMPLEMENTATION_SOURCE.replace(
-            "automated_status: NOT_RUN",
-            "automated_status: AUTOMATED_PASS",
-        );
+        let changed = IMPLEMENTATION_SOURCE
+            .replace("builder_status: IMPLEMENTED", "builder_status: NOT_STARTED");
         assert_ne!(changed, IMPLEMENTATION_SOURCE);
         let error = parse_documents(ROADMAP_SOURCE, PHASE_SOURCE, &changed).unwrap_err();
         assert!(error.contains("cannot claim automated acceptance"));
